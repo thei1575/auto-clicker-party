@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.1.3
+// @version      3.1.4
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -112,6 +112,8 @@
             .member { display:flex; justify-content:space-between; padding:6px 7px; color:#cbd5e1; background:#0f172a; border-radius:6px; font-size:11px; }
             .readonly { color:#94a3b8; }
             .footer { margin-top:11px; padding-top:9px; color:#64748b; border-top:1px solid #243247; font-size:10px; text-align:center; }
+            .footer a { color:#93c5fd; text-decoration:none; }
+            .footer a:hover { text-decoration:underline; }
         </style>
         <section class="panel" id="panel">
             <div class="header" id="drag-handle" title="Drag to move this window"><div class="title">Auto Clicker</div><div class="window-controls"><button class="minimize" id="minimize" title="Minimize" aria-label="Minimize">−</button><button class="close" id="hide" title="Hide panel" aria-label="Hide panel">×</button></div></div>
@@ -156,7 +158,7 @@
                 </div>
                 <div class="status" id="status">Ready</div>
             </section>
-            <footer class="footer">© 2026 Theis Jensen · Auto Clicker Party</footer>
+            <footer class="footer">© 2026 Theis N. Jensen · <a href="https://github.com/thei1575/auto-clicker-party" target="_blank" rel="noopener noreferrer">GitHub</a></footer>
         </section>`;
 
     const ui = Object.fromEntries([
