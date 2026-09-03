@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.0.2
+// @version      3.1.0
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @match        http://*/*
@@ -21,7 +21,6 @@
 
     const MIN_DELAY = 20;
     const SETTINGS_KEY = 'universalAutoClickerPartySettings';
-    const PARTY_SERVER_URL = 'wss://clicker.oz1tnj.dk';
     const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
     const PARTY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const TARGET_ATTRIBUTE = 'data-auto-clicker-target';
@@ -35,12 +34,13 @@
     let timer = null;
     let clicksCompleted = 0;
     let clicksPlanned = 0;
-    let socket = null;
     let httpParty = null;
-    let startingHttpFallback = false;
     let partyRole = null;
     let partyCode = '';
     let connectionTimer = null;
+    let partySendChain = Promise.resolve();
+    let lastGuestReport = { state: '', time: 0 };
+    let lastPartyRevision = 0;
     const memberStats = new Map();
 
     const pageStyle = document.createElement('style');
@@ -214,7 +214,7 @@
     }
 
     function partyConnected() {
-        return (socket && socket.readyState === WebSocket.OPEN && partyRole) || (httpParty && partyRole);
+        return Boolean(httpParty && partyRole);
     }
 
     function clearConnectionTimer() {
@@ -228,19 +228,14 @@
         clearConnectionTimer();
         const currentHttpParty = httpParty;
         httpParty = null;
-        startingHttpFallback = false;
         if (currentHttpParty) {
             currentHttpParty.closed = true;
             partyRequest('POST', `/api/party/disconnect?token=${encodeURIComponent(currentHttpParty.token)}`).catch(() => {});
         }
-        if (socket) {
-            const current = socket;
-            socket = null;
-            current.onclose = null;
-            current.close();
-        }
         partyRole = null;
         partyCode = '';
+        lastGuestReport = { state: '', time: 0 };
+        lastPartyRevision = 0;
         memberStats.clear();
     }
 
@@ -253,10 +248,16 @@
     }
 
     function sendParty(message) {
-        if (socket && socket.readyState === WebSocket.OPEN && partyRole) {
-            socket.send(JSON.stringify(message));
-        } else if (httpParty && partyRole) {
-            partyRequest('POST', `/api/party/message?token=${encodeURIComponent(httpParty.token)}`, message).catch(() => {});
+        if (httpParty && partyRole) {
+            const session = httpParty;
+            partySendChain = partySendChain
+                .catch(() => {})
+                .then(() => {
+                    if (httpParty === session && !session.closed) {
+                        return partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, message);
+                    }
+                })
+                .catch(() => {});
         }
     }
 
@@ -283,37 +284,7 @@
             setStatus('Connecting to host…');
         }
 
-        let newSocket;
-        try {
-            newSocket = new WebSocket(PARTY_SERVER_URL);
-        } catch (_) {
-            startHttpFallback(role, roomCode);
-            return;
-        }
-
-        socket = newSocket;
-        connectionTimer = setTimeout(() => {
-            if (socket === newSocket && !partyRole) startHttpFallback(role, roomCode);
-        }, 10_000);
-        newSocket.onopen = () => newSocket.send(JSON.stringify({ type: role, roomCode }));
-        newSocket.onmessage = event => handlePartyMessage(newSocket, event.data);
-        newSocket.onerror = () => {
-            if (!partyRole) setStatus('Trying compatible connection…');
-        };
-        newSocket.onclose = () => {
-            if (socket !== newSocket) return;
-            const hadParty = Boolean(partyRole);
-            clearConnectionTimer();
-            socket = null;
-            if (!hadParty && !httpParty) {
-                startHttpFallback(role, roomCode);
-                return;
-            }
-            partyRole = null;
-            if (hadParty) stopClicking('Party disconnected — stopped');
-            if (mode === 'host') ui.partyStatus.textContent = 'Disconnected';
-            if (mode === 'join') setStatus('Disconnected from host.', 'error');
-        };
+        startHttpParty(role, roomCode);
     }
 
     function connectionFailed(message) {
@@ -341,16 +312,9 @@
         });
     }
 
-    async function startHttpFallback(role, roomCode) {
-        if (partyRole || httpParty || startingHttpFallback) return;
-        startingHttpFallback = true;
+    async function startHttpParty(role, roomCode) {
+        if (partyRole || httpParty) return;
         clearConnectionTimer();
-        if (socket) {
-            const current = socket;
-            socket = null;
-            current.onclose = null;
-            current.close();
-        }
         if (role === 'host') ui.partyStatus.textContent = 'Connecting…';
         else setStatus('Connecting to host…');
         try {
@@ -359,11 +323,9 @@
             if (!result.token || !result.message) throw new Error('Invalid party server response');
             const session = { token: result.token, closed: false };
             httpParty = session;
-            startingHttpFallback = false;
             handlePartyMessage(session, JSON.stringify(result.message));
             pollHttpParty(session);
         } catch (_) {
-            startingHttpFallback = false;
             connectionFailed('Could not connect to the party server.');
         }
     }
@@ -375,6 +337,7 @@
                 if (!response.responseText) continue;
                 const result = JSON.parse(response.responseText);
                 for (const message of result.messages || []) handlePartyMessage(session, JSON.stringify(message));
+                applyPartyState(result.state);
             } catch (_) {
                 if (httpParty === session && !session.closed) {
                     setStatus('Party connection interrupted. Retrying…', 'error');
@@ -408,11 +371,14 @@
 
     function reportGuest(state) {
         if (partyRole !== 'join') return;
+        const now = Date.now();
+        if (state === 'Running' && lastGuestReport.state === state && now - lastGuestReport.time < 500) return;
+        lastGuestReport = { state, time: now };
         sendParty({ type: 'client-status', state, clicks: clicksCompleted, total: clicksPlanned === 0 ? null : clicksPlanned });
     }
 
     function handlePartyMessage(sourceSocket, rawMessage) {
-        if (sourceSocket !== socket && sourceSocket !== httpParty) return;
+        if (sourceSocket !== httpParty) return;
         let message;
         try { message = JSON.parse(rawMessage); } catch (_) { return; }
 
@@ -449,6 +415,7 @@
             return;
         }
         if (message.type === 'command' && partyRole === 'join') {
+            if (Number.isInteger(message.revision)) lastPartyRevision = Math.max(lastPartyRevision, message.revision);
             if (message.command === 'config') applyPartyConfig(message);
             if (message.command === 'start') {
                 if (message.settings && typeof message.targetSelector === 'string') applyPartyConfig(message);
@@ -464,6 +431,14 @@
             return;
         }
         if (message.type === 'error') connectionFailed(message.message || 'Party error.');
+    }
+
+    function applyPartyState(state) {
+        if (partyRole !== 'join' || !state || !Number.isInteger(state.revision) || state.revision <= lastPartyRevision) return;
+        lastPartyRevision = state.revision;
+        if (state.config) applyPartyConfig(state.config);
+        if (state.running) startClicking(true);
+        else stopClicking('Stopped by host');
     }
 
     function applyPartyConfig(config) {

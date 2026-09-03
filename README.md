@@ -29,7 +29,7 @@ docker run -d --name auto-clicker-party --restart unless-stopped -p 127.0.0.1:87
 4. Save the script (`Cmd/Ctrl + S`). It should appear as **Universal Button Auto Clicker Party** and be enabled in the dashboard.
 5. Open or reload the page containing the button to click. The panel appears in the top-right corner. If it was hidden, open Tampermonkey's extension menu and select **Show Auto Clicker**.
 
-The script already uses the public relay at `wss://clicker.oz1tnj.dk`; no server address needs to be entered. It uses WebSocket by default. On Chromium pages that block external WebSockets, it automatically uses Tampermonkey's permitted compatibility connection instead; no browser setting or extra configuration is required.
+The script already uses the public relay at `https://clicker.oz1tnj.dk`; no server address needs to be entered. It uses Tampermonkey's permitted HTTPS connection for every browser, so it also works on Chromium pages that block external WebSockets. No browser setting or extra configuration is required.
 
 ## Use the party controls
 

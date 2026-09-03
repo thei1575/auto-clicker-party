@@ -8,7 +8,7 @@ const clientInfo = new Map();
 const httpClients = new Map();
 const roomCodePattern = /^[A-Z2-9]{6,16}$/;
 const MAX_MESSAGE_SIZE = 8 * 1024;
-const LONG_POLL_MS = 25_000;
+const LONG_POLL_MS = 2_000;
 const HTTP_CLIENT_TTL_MS = 70_000;
 let nextMemberId = 1;
 
@@ -46,13 +46,19 @@ function send(client, message) {
             client.waiting = null;
             clearTimeout(client.waitTimer);
             client.waitTimer = null;
-            writeJson(response, 200, { messages: [message] });
+            writeJson(response, 200, { messages: [message], state: partyState(client) });
         } else {
             client.queue.push(message);
         }
         return;
     }
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
+}
+
+function partyState(client) {
+    const info = clientInfo.get(client);
+    const room = info && rooms.get(info.roomCode);
+    return room ? room.state : null;
 }
 
 function broadcast(room, message, except = null) {
@@ -134,7 +140,12 @@ function connectClient(client, message) {
             send(client, { type: 'error', message: 'That party code is already in use.' });
             return;
         }
-        rooms.set(code, { host: client, clients: new Set([client]), members: new Map() });
+        rooms.set(code, {
+            host: client,
+            clients: new Set([client]),
+            members: new Map(),
+            state: { revision: 0, running: false, config: null }
+        });
         clientInfo.set(client, { roomCode: code, role: 'host' });
         send(client, { type: 'welcome', role: 'host', roomCode: code, participants: 1 });
         return;
@@ -164,7 +175,20 @@ function handleMessage(client, message) {
     }
     if (info.role !== 'host') return send(client, { type: 'error', message: 'Only the host can send party commands.' });
     if (!validCommand(message)) return send(client, { type: 'error', message: 'Invalid party command.' });
-    broadcast(room, message, client);
+
+    if (message.command === 'config') {
+        room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
+    } else if (message.command === 'start') {
+        if (message.settings && typeof message.targetSelector === 'string') {
+            room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
+        }
+        room.state.running = true;
+    } else if (message.command === 'stop') {
+        room.state.running = false;
+    }
+
+    room.state.revision++;
+    broadcast(room, { ...message, revision: room.state.revision }, client);
 }
 
 const httpServer = http.createServer(async (request, response) => {
@@ -207,14 +231,14 @@ const httpServer = http.createServer(async (request, response) => {
             return writeJson(response, 204);
         }
         if (url.pathname === '/api/party/events' && request.method === 'GET') {
-            if (client.queue.length) return writeJson(response, 200, { messages: client.queue.splice(0) });
+            if (client.queue.length) return writeJson(response, 200, { messages: client.queue.splice(0), state: partyState(client) });
             closeHttpWait(client);
             client.waiting = response;
             client.waitTimer = setTimeout(() => {
                 if (client.waiting === response) {
                     client.waiting = null;
                     client.waitTimer = null;
-                    writeJson(response, 204);
+                    writeJson(response, 200, { messages: [], state: partyState(client) });
                 }
             }, LONG_POLL_MS);
             response.on('close', () => {
