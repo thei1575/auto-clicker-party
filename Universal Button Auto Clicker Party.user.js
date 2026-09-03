@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.1.5
+// @version      3.1.6
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -16,6 +16,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
 // @connect      clicker.oz1tnj.dk
 // ==/UserScript==
@@ -95,6 +96,9 @@
             #join-form { margin-top:12px; margin-bottom:0; }
             #join-form .action { width:100%; margin-top:12px; }
             .card-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:7px; color:#bfdbfe; font-weight:700; }
+            .party-code-wrap { display:flex; align-items:center; gap:7px; }
+            .copy-code { padding:3px 6px; color:#bfdbfe; background:#1e3a5f; border:1px solid #3b82f6; border-radius:5px; cursor:pointer; font-size:10px; }
+            .copy-code:hover { background:#254b78; }
             .target { min-height:34px; margin-bottom:9px; padding:8px 9px; overflow:hidden; color:#94a3b8; background:#0f172a; border:1px solid #334155; border-radius:8px; text-overflow:ellipsis; white-space:nowrap; }
             .target.selected { color:#a7f3d0; border-color:#059669; }
             .grid { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin:10px 0; }
@@ -137,7 +141,7 @@
             <section class="screen" id="control-screen" hidden>
                 <div class="header"><button class="back" id="back">← Change mode</button><span id="mode-label"></span></div>
                 <section class="card host-only" id="host-card" hidden>
-                    <div class="card-title"><span>Party code</span><span id="party-code"></span></div>
+                    <div class="card-title"><span>Party code</span><span class="party-code-wrap"><span id="party-code"></span><button class="copy-code" id="copy-code" title="Copy party code">Copy</button></span></div>
                     <div class="party-status" id="party-status">Connecting…</div>
                 </section>
                 <section class="card host-only" id="member-card" hidden>
@@ -166,7 +170,7 @@
     const ui = Object.fromEntries([
         'panel', 'hide', 'minimize', 'drag-handle', 'mode-screen', 'control-screen', 'choose-local', 'choose-host', 'choose-join',
         'join-form', 'join-code', 'connect-join', 'mode-status', 'back', 'mode-label',
-        'host-card', 'party-code', 'party-status', 'member-card', 'member-count', 'member-list',
+        'host-card', 'party-code', 'copy-code', 'party-status', 'member-card', 'member-count', 'member-list',
         'join-card', 'target', 'selection-controls', 'select', 'control-settings', 'delay',
         'randomization', 'count', 'start', 'stop', 'status'
     ].map(id => [id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), shadow.getElementById(id)]));
@@ -270,6 +274,17 @@
         const values = new Uint32Array(8);
         crypto.getRandomValues(values);
         return Array.from(values, value => PARTY_CODE_ALPHABET[value % PARTY_CODE_ALPHABET.length]).join('');
+    }
+
+    function copyPartyCode() {
+        if (!partyCode) return;
+        try {
+            GM_setClipboard(partyCode, 'text');
+            ui.copyCode.textContent = 'Copied';
+        } catch (_) {
+            ui.copyCode.textContent = 'Copy failed';
+        }
+        setTimeout(() => { ui.copyCode.textContent = 'Copy'; }, 1_500);
     }
 
     function partyConnected() {
@@ -730,6 +745,7 @@
     ui.joinCode.addEventListener('keydown', event => { if (event.key === 'Enter') ui.connectJoin.click(); });
     ui.dragHandle.addEventListener('pointerdown', startDragging);
     ui.minimize.addEventListener('click', toggleMinimized);
+    ui.copyCode.addEventListener('click', copyPartyCode);
     ui.back.addEventListener('click', leaveToModePicker);
     ui.select.addEventListener('click', () => selecting ? endSelection() : beginSelection());
     ui.start.addEventListener('click', () => {
