@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.0.0
+// @version      3.0.1
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @match        http://*/*
@@ -12,6 +12,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      clicker.oz1tnj.dk
 // ==/UserScript==
 
 (function () {
@@ -20,6 +22,7 @@
     const MIN_DELAY = 20;
     const SETTINGS_KEY = 'universalAutoClickerPartySettings';
     const PARTY_SERVER_URL = 'wss://clicker.oz1tnj.dk';
+    const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
     const PARTY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const TARGET_ATTRIBUTE = 'data-auto-clicker-target';
     const HOVER_ATTRIBUTE = 'data-auto-clicker-hover';
@@ -33,6 +36,8 @@
     let clicksCompleted = 0;
     let clicksPlanned = 0;
     let socket = null;
+    let httpParty = null;
+    let startingHttpFallback = false;
     let partyRole = null;
     let partyCode = '';
     let connectionTimer = null;
@@ -209,7 +214,7 @@
     }
 
     function partyConnected() {
-        return socket && socket.readyState === WebSocket.OPEN && partyRole;
+        return (socket && socket.readyState === WebSocket.OPEN && partyRole) || (httpParty && partyRole);
     }
 
     function clearConnectionTimer() {
@@ -221,6 +226,13 @@
 
     function disconnectParty() {
         clearConnectionTimer();
+        const currentHttpParty = httpParty;
+        httpParty = null;
+        startingHttpFallback = false;
+        if (currentHttpParty) {
+            currentHttpParty.closed = true;
+            partyRequest('POST', `/api/party/disconnect?token=${encodeURIComponent(currentHttpParty.token)}`).catch(() => {});
+        }
         if (socket) {
             const current = socket;
             socket = null;
@@ -241,7 +253,11 @@
     }
 
     function sendParty(message) {
-        if (partyConnected()) socket.send(JSON.stringify(message));
+        if (socket && socket.readyState === WebSocket.OPEN && partyRole) {
+            socket.send(JSON.stringify(message));
+        } else if (httpParty && partyRole) {
+            partyRequest('POST', `/api/party/message?token=${encodeURIComponent(httpParty.token)}`, message).catch(() => {});
+        }
     }
 
     function getPartyConfig() {
@@ -267,22 +283,28 @@
         try {
             newSocket = new WebSocket(PARTY_SERVER_URL);
         } catch (_) {
-            connectionFailed('Your browser blocked the party connection.');
+            startHttpFallback(role, roomCode);
             return;
         }
 
         socket = newSocket;
         connectionTimer = setTimeout(() => {
-            if (socket === newSocket && !partyRole) connectionFailed('Connection timed out. Reload and try again.');
+            if (socket === newSocket && !partyRole) startHttpFallback(role, roomCode);
         }, 10_000);
         newSocket.onopen = () => newSocket.send(JSON.stringify({ type: role, roomCode }));
         newSocket.onmessage = event => handlePartyMessage(newSocket, event.data);
-        newSocket.onerror = () => setStatus('Could not connect to the party server.', 'error');
+        newSocket.onerror = () => {
+            if (!partyRole) setStatus('Trying compatible connection…');
+        };
         newSocket.onclose = () => {
             if (socket !== newSocket) return;
             const hadParty = Boolean(partyRole);
             clearConnectionTimer();
             socket = null;
+            if (!hadParty && !httpParty) {
+                startHttpFallback(role, roomCode);
+                return;
+            }
             partyRole = null;
             if (hadParty) stopClicking('Party disconnected — stopped');
             if (mode === 'host') ui.partyStatus.textContent = 'Disconnected';
@@ -295,6 +317,67 @@
         setStatus(message, 'error');
         showModeScreen();
         setModeStatus(message, 'error');
+    }
+
+    function partyRequest(method, path, data) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method,
+                url: PARTY_HTTP_URL + path,
+                headers: data ? { 'Content-Type': 'application/json' } : undefined,
+                data: data ? JSON.stringify(data) : undefined,
+                timeout: 35_000,
+                onload: response => {
+                    if (response.status >= 200 && response.status < 300) resolve(response);
+                    else reject(new Error(`Party server returned ${response.status}`));
+                },
+                onerror: () => reject(new Error('Party request failed')),
+                ontimeout: () => reject(new Error('Party request timed out'))
+            });
+        });
+    }
+
+    async function startHttpFallback(role, roomCode) {
+        if (partyRole || httpParty || startingHttpFallback) return;
+        startingHttpFallback = true;
+        clearConnectionTimer();
+        if (socket) {
+            const current = socket;
+            socket = null;
+            current.onclose = null;
+            current.close();
+        }
+        if (role === 'host') ui.partyStatus.textContent = 'Connecting…';
+        else setStatus('Connecting to host…');
+        try {
+            const response = await partyRequest('POST', '/api/party/connect', { type: role, roomCode });
+            const result = JSON.parse(response.responseText);
+            if (!result.token || !result.message) throw new Error('Invalid party server response');
+            const session = { token: result.token, closed: false };
+            httpParty = session;
+            startingHttpFallback = false;
+            handlePartyMessage(session, JSON.stringify(result.message));
+            pollHttpParty(session);
+        } catch (_) {
+            startingHttpFallback = false;
+            connectionFailed('Could not connect to the party server.');
+        }
+    }
+
+    async function pollHttpParty(session) {
+        while (httpParty === session && !session.closed && partyRole) {
+            try {
+                const response = await partyRequest('GET', `/api/party/events?token=${encodeURIComponent(session.token)}`);
+                if (!response.responseText) continue;
+                const result = JSON.parse(response.responseText);
+                for (const message of result.messages || []) handlePartyMessage(session, JSON.stringify(message));
+            } catch (_) {
+                if (httpParty === session && !session.closed) {
+                    setStatus('Party connection interrupted. Retrying…', 'error');
+                    await new Promise(resolve => setTimeout(resolve, 1_000));
+                }
+            }
+        }
     }
 
     function renderMemberStats() {
@@ -325,7 +408,7 @@
     }
 
     function handlePartyMessage(sourceSocket, rawMessage) {
-        if (sourceSocket !== socket) return;
+        if (sourceSocket !== socket && sourceSocket !== httpParty) return;
         let message;
         try { message = JSON.parse(rawMessage); } catch (_) { return; }
 
