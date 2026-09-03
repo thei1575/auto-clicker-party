@@ -316,7 +316,7 @@ const httpServer = http.createServer(async (request, response) => {
                 httpClients.delete(client.token);
                 return writeJson(response, 400, firstMessage);
             }
-            return writeJson(response, 200, { token: client.token, message: firstMessage });
+            return writeJson(response, 200, { token: client.token, message: firstMessage, state: partyState(client) });
         }
 
         const token = url.searchParams.get('token');
@@ -350,6 +350,10 @@ const httpServer = http.createServer(async (request, response) => {
                     client.waiting = null;
                     clearTimeout(client.waitTimer);
                     client.waitTimer = null;
+                    // A browser reload or navigation aborts its active long poll.
+                    // Remove the logical session immediately instead of showing a ghost member until TTL expiry.
+                    removeFromRoom(client);
+                    httpClients.delete(client.token);
                 }
             });
             return;

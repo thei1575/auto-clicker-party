@@ -41,6 +41,8 @@ You can drag the panel by its title bar. Its position is remembered on future pa
 4. In **Join** mode, enter the code from the host. Joined browsers are read-only: the host's target selector and settings are applied automatically.
 5. The host dashboard shows party click progress and total clicks per second, plus every joined browser's readiness, state, progress, and click rate.
 
+If a connection is interrupted, the script retries automatically. When a relay session has expired, it rejoins the party using the same code and immediately applies the host's current party state.
+
 > Joined browsers should be on matching pages with the same button layout. The host's selected CSS selector must exist in every joined browser for synchronized clicking to work.
 
 The server keeps parties only in memory. Restarting it disconnects every party. The party code is the access key, so share it only with people who should be able to join. This is a coordination relay, not authentication or end-to-end encryption.

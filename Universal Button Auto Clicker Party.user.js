@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.2.0
+// @version      3.2.1
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -46,6 +46,8 @@
     let partyRole = null;
     let partyCode = '';
     let connectionTimer = null;
+    let reconnectTimer = null;
+    let reconnectAttempt = 0;
     let partySendChain = Promise.resolve();
     let lastGuestReport = { state: '', time: 0 };
     let lastPartyRevision = 0;
@@ -323,6 +325,9 @@
 
     function disconnectParty() {
         clearConnectionTimer();
+        if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        reconnectAttempt = 0;
         cancelCountdown();
         const currentHttpParty = httpParty;
         httpParty = null;
@@ -416,6 +421,25 @@
         setModeStatus(message, 'error');
     }
 
+    function schedulePartyReconnect(role = mode, roomCode = partyCode) {
+        if (reconnectTimer !== null || !role || !roomCode) return;
+        const previousSession = httpParty;
+        if (previousSession) previousSession.closed = true;
+        httpParty = null;
+        partyRole = null;
+        lastPartyRevision = 0;
+        if (mode === 'join') stopClicking('Connection lost. Reconnecting…');
+        if (role === 'host') ui.partyStatus.textContent = 'Reconnecting…';
+        else setStatus('Connection lost. Reconnecting…', 'error');
+        updateControls();
+        const delay = Math.min(10_000, 1_000 * (2 ** Math.min(reconnectAttempt, 4)));
+        reconnectAttempt++;
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            startHttpParty(role, roomCode, true);
+        }, delay);
+    }
+
     function partyRequest(method, path, data) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -426,7 +450,11 @@
                 timeout: 35_000,
                 onload: response => {
                     if (response.status >= 200 && response.status < 300) resolve(response);
-                    else reject(new Error(`Party server returned ${response.status}`));
+                    else {
+                        const error = new Error(`Party server returned ${response.status}`);
+                        error.status = response.status;
+                        reject(error);
+                    }
                 },
                 onerror: () => reject(new Error('Party request failed')),
                 ontimeout: () => reject(new Error('Party request timed out'))
@@ -434,7 +462,7 @@
         });
     }
 
-    async function startHttpParty(role, roomCode) {
+    async function startHttpParty(role, roomCode, reconnecting = false) {
         if (partyRole || httpParty) return;
         clearConnectionTimer();
         if (role === 'host') ui.partyStatus.textContent = 'Connecting…';
@@ -446,9 +474,12 @@
             const session = { token: result.token, closed: false };
             httpParty = session;
             handlePartyMessage(session, JSON.stringify(result.message));
+            reconnectAttempt = 0;
+            applyPartyState(result.state);
             pollHttpParty(session);
         } catch (_) {
-            connectionFailed('Could not connect to the party server.');
+            if (reconnecting) schedulePartyReconnect(role, roomCode);
+            else connectionFailed('Could not connect to the party server.');
         }
     }
 
@@ -460,8 +491,12 @@
                 const result = JSON.parse(response.responseText);
                 for (const message of result.messages || []) handlePartyMessage(session, JSON.stringify(message));
                 applyPartyState(result.state);
-            } catch (_) {
+            } catch (error) {
                 if (httpParty === session && !session.closed) {
+                    if (error.status === 401) {
+                        schedulePartyReconnect(mode, partyCode);
+                        break;
+                    }
                     setStatus('Party connection interrupted. Retrying…', 'error');
                     await new Promise(resolve => setTimeout(resolve, 1_000));
                 }
