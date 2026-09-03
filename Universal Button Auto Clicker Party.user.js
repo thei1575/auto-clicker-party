@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.1.0
+// @version      3.1.1
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @match        http://*/*
@@ -55,6 +55,11 @@
     host.style.cssText = 'all:initial;position:fixed;top:16px;right:16px;z-index:2147483647;';
     document.documentElement.appendChild(host);
     const shadow = host.attachShadow({ mode: 'open' });
+
+    const joinedTargetMarker = document.createElement('div');
+    joinedTargetMarker.setAttribute('aria-hidden', 'true');
+    joinedTargetMarker.style.cssText = 'all:initial;display:none;position:fixed;z-index:2147483646;box-sizing:border-box;border:3px solid #22c55e;border-radius:999px;box-shadow:0 0 0 3px rgba(34,197,94,.24),0 0 18px rgba(34,197,94,.8);pointer-events:none;';
+    document.documentElement.appendChild(joinedTargetMarker);
 
     shadow.innerHTML = `
         <style>
@@ -236,6 +241,7 @@
         partyCode = '';
         lastGuestReport = { state: '', time: 0 };
         lastPartyRevision = 0;
+        hideJoinedTargetMarker();
         memberStats.clear();
     }
 
@@ -447,6 +453,8 @@
         ui.delay.value = settings.delay;
         ui.randomization.value = settings.randomization;
         ui.count.value = settings.count;
+        if (target) target.removeAttribute(TARGET_ATTRIBUTE);
+        hideJoinedTargetMarker();
         targetSelector = config.targetSelector || '';
         target = null;
         if (!targetSelector) {
@@ -458,6 +466,7 @@
         const element = resolveTarget();
         if (element) {
             setTargetDisplay(element);
+            showJoinedTargetMarker(element);
             setStatus('Ready — target received from host.');
             reportGuest('Ready');
         } else {
@@ -508,6 +517,27 @@
         ui.target.textContent = mode === 'join' ? 'Waiting for target from host' : 'No button selected';
         ui.target.title = '';
         ui.target.classList.remove('selected');
+    }
+
+    function showJoinedTargetMarker(element) {
+        if (mode !== 'join' || !element?.isConnected) return;
+        const rect = element.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return hideJoinedTargetMarker();
+        const padding = 7;
+        joinedTargetMarker.style.display = 'block';
+        joinedTargetMarker.style.left = `${Math.max(0, rect.left - padding)}px`;
+        joinedTargetMarker.style.top = `${Math.max(0, rect.top - padding)}px`;
+        joinedTargetMarker.style.width = `${rect.width + padding * 2}px`;
+        joinedTargetMarker.style.height = `${rect.height + padding * 2}px`;
+    }
+
+    function hideJoinedTargetMarker() {
+        joinedTargetMarker.style.display = 'none';
+    }
+
+    function refreshJoinedTargetMarker() {
+        if (mode === 'join' && target?.isConnected) showJoinedTargetMarker(target);
+        else hideJoinedTargetMarker();
     }
 
     function clearHover() {
@@ -594,6 +624,7 @@
             if (mode === 'join') reportGuest('Target not found');
             return;
         }
+        refreshJoinedTargetMarker();
         element.click();
         clicksCompleted++;
         if (clicksPlanned > 0 && clicksCompleted >= clicksPlanned) {
@@ -672,6 +703,9 @@
             stopClicking();
         }
     }, true);
+
+    window.addEventListener('scroll', refreshJoinedTargetMarker, true);
+    window.addEventListener('resize', refreshJoinedTargetMarker);
 
     GM_registerMenuCommand('Show Auto Clicker', () => { host.style.display = 'block'; });
     loadSettings();
