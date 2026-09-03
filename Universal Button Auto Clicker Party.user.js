@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.1.2
+// @version      3.1.3
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -45,6 +45,7 @@
     let partySendChain = Promise.resolve();
     let lastGuestReport = { state: '', time: 0 };
     let lastPartyRevision = 0;
+    let dragOffset = null;
     const memberStats = new Map();
 
     const pageStyle = document.createElement('style');
@@ -69,13 +70,19 @@
         <style>
             :host { all:initial; }
             * { box-sizing:border-box; }
-            .panel { width:330px; padding:14px; color:#f8fafc; background:rgba(15,23,42,.98); border:1px solid #334155; border-radius:12px; box-shadow:0 14px 35px rgba(0,0,0,.38); font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+            .panel { width:330px; padding:14px; color:#f8fafc; background:rgba(15,23,42,.98); border:1px solid #334155; border-radius:12px; box-shadow:0 14px 35px rgba(0,0,0,.38); font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; user-select:none; }
+            .panel.minimized { width:190px; padding:9px 10px; }
+            .panel.minimized .screen,.panel.minimized .footer { display:none; }
             .header { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+            #drag-handle { cursor:move; touch-action:none; }
+            .panel.minimized #drag-handle { margin:0; }
             .title { font-size:15px; font-weight:700; }
             button { font:inherit; }
-            .close,.back { padding:5px 7px; color:#cbd5e1; background:transparent; border:0; border-radius:7px; cursor:pointer; }
+            .window-controls { display:flex; gap:2px; }
+            .close,.minimize,.back { padding:5px 7px; color:#cbd5e1; background:transparent; border:0; border-radius:7px; cursor:pointer; }
             .close { font-size:18px; }
-            .close:hover,.back:hover { background:#334155; }
+            .minimize { font-size:18px; line-height:1; }
+            .close:hover,.minimize:hover,.back:hover { background:#334155; }
             .screen[hidden],.host-only[hidden],.join-only[hidden] { display:none; }
             .intro { margin:2px 0 12px; color:#94a3b8; }
             .mode-buttons { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
@@ -104,9 +111,10 @@
             .member-list { display:grid; gap:5px; }
             .member { display:flex; justify-content:space-between; padding:6px 7px; color:#cbd5e1; background:#0f172a; border-radius:6px; font-size:11px; }
             .readonly { color:#94a3b8; }
+            .footer { margin-top:11px; padding-top:9px; color:#64748b; border-top:1px solid #243247; font-size:10px; text-align:center; }
         </style>
-        <section class="panel">
-            <div class="header"><div class="title">Auto Clicker</div><button class="close" id="hide" title="Hide panel">×</button></div>
+        <section class="panel" id="panel">
+            <div class="header" id="drag-handle" title="Drag to move this window"><div class="title">Auto Clicker</div><div class="window-controls"><button class="minimize" id="minimize" title="Minimize" aria-label="Minimize">−</button><button class="close" id="hide" title="Hide panel" aria-label="Hide panel">×</button></div></div>
 
             <section class="screen" id="mode-screen">
                 <p class="intro">Choose how this browser should participate.</p>
@@ -148,10 +156,11 @@
                 </div>
                 <div class="status" id="status">Ready</div>
             </section>
+            <footer class="footer">© 2026 Theis Jensen · Auto Clicker Party</footer>
         </section>`;
 
     const ui = Object.fromEntries([
-        'hide', 'mode-screen', 'control-screen', 'choose-local', 'choose-host', 'choose-join',
+        'panel', 'hide', 'minimize', 'drag-handle', 'mode-screen', 'control-screen', 'choose-local', 'choose-host', 'choose-join',
         'join-form', 'join-code', 'connect-join', 'mode-status', 'back', 'mode-label',
         'host-card', 'party-code', 'party-status', 'member-card', 'member-count', 'member-list',
         'join-card', 'target', 'selection-controls', 'select', 'control-settings', 'delay',
@@ -166,6 +175,43 @@
     function setModeStatus(message, type = '') {
         ui.modeStatus.textContent = message;
         ui.modeStatus.className = `status ${type}`.trim();
+    }
+
+    function startDragging(event) {
+        if (event.button !== 0 || event.target.closest('button')) return;
+        const rect = host.getBoundingClientRect();
+        dragOffset = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+        host.style.left = `${rect.left}px`;
+        host.style.top = `${rect.top}px`;
+        host.style.right = 'auto';
+        event.preventDefault();
+        window.addEventListener('pointermove', dragWindow, true);
+        window.addEventListener('pointerup', stopDragging, true);
+        window.addEventListener('pointercancel', stopDragging, true);
+    }
+
+    function dragWindow(event) {
+        if (!dragOffset) return;
+        const width = host.offsetWidth;
+        const height = host.offsetHeight;
+        const left = Math.min(Math.max(0, event.clientX - dragOffset.x), Math.max(0, window.innerWidth - width));
+        const top = Math.min(Math.max(0, event.clientY - dragOffset.y), Math.max(0, window.innerHeight - height));
+        host.style.left = `${left}px`;
+        host.style.top = `${top}px`;
+    }
+
+    function stopDragging() {
+        dragOffset = null;
+        window.removeEventListener('pointermove', dragWindow, true);
+        window.removeEventListener('pointerup', stopDragging, true);
+        window.removeEventListener('pointercancel', stopDragging, true);
+    }
+
+    function toggleMinimized() {
+        const minimized = ui.panel.classList.toggle('minimized');
+        ui.minimize.textContent = minimized ? '+' : '−';
+        ui.minimize.title = minimized ? 'Restore' : 'Minimize';
+        ui.minimize.setAttribute('aria-label', minimized ? 'Restore' : 'Minimize');
     }
 
     function getSettings() {
@@ -678,6 +724,8 @@
         connectToParty('join', code);
     });
     ui.joinCode.addEventListener('keydown', event => { if (event.key === 'Enter') ui.connectJoin.click(); });
+    ui.dragHandle.addEventListener('pointerdown', startDragging);
+    ui.minimize.addEventListener('click', toggleMinimized);
     ui.back.addEventListener('click', leaveToModePicker);
     ui.select.addEventListener('click', () => selecting ? endSelection() : beginSelection());
     ui.start.addEventListener('click', () => {

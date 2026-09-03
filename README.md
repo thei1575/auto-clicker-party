@@ -33,6 +33,8 @@ The script already uses the public relay at `https://clicker.oz1tnj.dk`; no serv
 
 ## Use the party controls
 
+You can drag the panel by its title bar. Use the `−` button to minimize it to a small title bar and `+` to restore it.
+
 1. On the first screen, choose **Local**, **Host**, or **Join**.
 2. In **Local** mode, select a target button and control the clicker only in this browser.
 3. In **Host** mode, select the target button, share the generated party code, then set the delay, randomization, and click count. Start and Stop are synchronized to all joined browsers.
