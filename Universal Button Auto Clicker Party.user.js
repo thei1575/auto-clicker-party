@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.2.1
+// @version      3.2.2
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -28,6 +28,7 @@
     const SETTINGS_KEY = 'universalAutoClickerPartySettings';
     const PANEL_POSITION_KEY = 'universalAutoClickerPartyPanelPosition';
     const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
+    const COUNTDOWN_SYNC_BUFFER_MS = 5_000;
     const PARTY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const TARGET_ATTRIBUTE = 'data-auto-clicker-target';
     const HOVER_ATTRIBUTE = 'data-auto-clicker-hover';
@@ -167,7 +168,7 @@
                         <label>Base delay (ms)<input id="delay" type="number" min="${MIN_DELAY}" step="10" value="1000"></label>
                         <label>Randomize ± (ms)<input id="randomization" type="number" min="0" step="10" value="0"></label>
                         <label class="full">Number of clicks<input id="count" type="number" min="0" step="1" value="10"><div class="hint">0 = unlimited clicks</div></label>
-                        <label class="full host-only" id="countdown-field" hidden>Start countdown (seconds)<input id="countdown" type="number" min="0" max="60" step="1" value="0"><div class="hint">0 starts immediately. Joined browsers start together.</div></label>
+                        <label class="full host-only" id="countdown-field" hidden>Start countdown (seconds)<input id="countdown" type="number" min="0" max="60" step="1" value="0"><div class="hint">0 starts immediately. Countdown adds a 5-second sync buffer for joined browsers.</div></label>
                     </div>
                     <div class="buttons"><button class="action" id="start">Start</button><button class="action" id="stop" disabled>Stop</button></div>
                 </div>
@@ -879,7 +880,7 @@
             if (countdownSeconds > 0) {
                 const delayMs = countdownSeconds * 1_000;
                 sendParty(getPartyCountdownCommand(delayMs));
-                scheduleCountdown(Date.now() + delayMs);
+                scheduleCountdown(Date.now() + delayMs + COUNTDOWN_SYNC_BUFFER_MS);
                 return;
             }
             sendParty(getPartyStartCommand());

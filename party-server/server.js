@@ -13,6 +13,7 @@ const MAX_MESSAGE_SIZE = 8 * 1024;
 const LONG_POLL_MS = 2_000;
 const HTTP_CLIENT_TTL_MS = 70_000;
 const MEMBER_STATUS_FLUSH_MS = 1_000;
+const COUNTDOWN_SYNC_BUFFER_MS = 5_000;
 let nextMemberId = 1;
 let acceptedConnectionsTotal = 0;
 let metricsScrapesTotal = 0;
@@ -271,7 +272,7 @@ function handleMessage(client, message) {
         clearTimeout(room.countdownTimer);
         room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
         room.state.running = false;
-        room.state.scheduledStartAt = Date.now() + message.delayMs;
+        room.state.scheduledStartAt = Date.now() + message.delayMs + COUNTDOWN_SYNC_BUFFER_MS;
         room.countdownTimer = setTimeout(() => {
             if (rooms.get(info.roomCode) !== room || !room.state.scheduledStartAt) return;
             room.countdownTimer = null;
@@ -285,7 +286,7 @@ function handleMessage(client, message) {
                 targetSelector: room.state.config.targetSelector,
                 revision: room.state.revision
             });
-        }, message.delayMs);
+        }, message.delayMs + COUNTDOWN_SYNC_BUFFER_MS);
     }
 
     room.state.revision++;
