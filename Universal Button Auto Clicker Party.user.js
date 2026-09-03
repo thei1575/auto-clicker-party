@@ -1,9 +1,13 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.1.1
+// @version      3.1.2
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
+// @homepageURL   https://github.com/thei1575/auto-clicker-party
+// @supportURL    https://github.com/thei1575/auto-clicker-party/issues
+// @updateURL     https://raw.githubusercontent.com/thei1575/auto-clicker-party/main/Universal%20Button%20Auto%20Clicker%20Party.user.js
+// @downloadURL   https://raw.githubusercontent.com/thei1575/auto-clicker-party/main/Universal%20Button%20Auto%20Clicker%20Party.user.js
 // @match        http://*/*
 // @match        https://*/*
 // @noframes

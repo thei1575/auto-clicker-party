@@ -24,10 +24,10 @@ docker run -d --name auto-clicker-party --restart unless-stopped -p 127.0.0.1:87
 ## Install the Tampermonkey script
 
 1. Install the [Tampermonkey browser extension](https://www.tampermonkey.net/) and pin it to your browser toolbar.
-2. Open the Tampermonkey dashboard, select **Create a new script**, then remove the starter template.
-3. Open [`Universal Button Auto Clicker Party.user.js`](./Universal%20Button%20Auto%20Clicker%20Party.user.js) in this repository, copy its complete contents, and paste it into the Tampermonkey editor.
-4. Save the script (`Cmd/Ctrl + S`). It should appear as **Universal Button Auto Clicker Party** and be enabled in the dashboard.
-5. Open or reload the page containing the button to click. The panel appears in the top-right corner. If it was hidden, open Tampermonkey's extension menu and select **Show Auto Clicker**.
+2. Click [Install Auto Clicker Party](https://raw.githubusercontent.com/thei1575/auto-clicker-party/main/Universal%20Button%20Auto%20Clicker%20Party.user.js), then choose **Install** in Tampermonkey.
+3. Open or reload the page containing the button to click. The panel appears in the top-right corner. If it was hidden, open Tampermonkey's extension menu and select **Show Auto Clicker**.
+
+The script checks the public GitHub source for newer versions automatically. Tampermonkey will offer to install an update when one is available; you can also use **Check for userscript updates** from its extension menu.
 
 The script already uses the public relay at `https://clicker.oz1tnj.dk`; no server address needs to be entered. It uses Tampermonkey's permitted HTTPS connection for every browser, so it also works on Chromium pages that block external WebSockets. No browser setting or extra configuration is required.
 
