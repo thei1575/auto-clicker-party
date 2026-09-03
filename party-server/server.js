@@ -11,6 +11,9 @@ const MAX_MESSAGE_SIZE = 8 * 1024;
 const LONG_POLL_MS = 2_000;
 const HTTP_CLIENT_TTL_MS = 70_000;
 let nextMemberId = 1;
+let acceptedConnectionsTotal = 0;
+let metricsScrapesTotal = 0;
+const commandTotals = { config: 0, start: 0, stop: 0, countdown: 0 };
 
 function writeJson(response, status, payload) {
     response.writeHead(status, {
@@ -19,6 +22,43 @@ function writeJson(response, status, payload) {
         'access-control-allow-origin': '*'
     });
     response.end(payload === undefined ? '' : JSON.stringify(payload));
+}
+
+function writeMetrics(response) {
+    metricsScrapesTotal++;
+    let connectedClients = 0;
+    let joinedClients = 0;
+    let scheduledStarts = 0;
+    for (const room of rooms.values()) {
+        connectedClients += room.clients.size;
+        joinedClients += room.members.size;
+        if (room.state.scheduledStartAt) scheduledStarts++;
+    }
+    const lines = [
+        '# HELP auto_clicker_party_rooms Active party rooms.',
+        '# TYPE auto_clicker_party_rooms gauge',
+        `auto_clicker_party_rooms ${rooms.size}`,
+        '# HELP auto_clicker_party_connected_clients Connected host and joined clients.',
+        '# TYPE auto_clicker_party_connected_clients gauge',
+        `auto_clicker_party_connected_clients ${connectedClients}`,
+        '# HELP auto_clicker_party_joined_clients Connected non-host clients.',
+        '# TYPE auto_clicker_party_joined_clients gauge',
+        `auto_clicker_party_joined_clients ${joinedClients}`,
+        '# HELP auto_clicker_party_scheduled_starts Party countdowns waiting to start.',
+        '# TYPE auto_clicker_party_scheduled_starts gauge',
+        `auto_clicker_party_scheduled_starts ${scheduledStarts}`,
+        '# HELP auto_clicker_party_connections_total Accepted party connections since service start.',
+        '# TYPE auto_clicker_party_connections_total counter',
+        `auto_clicker_party_connections_total ${acceptedConnectionsTotal}`,
+        '# HELP auto_clicker_party_commands_total Host commands received since service start.',
+        '# TYPE auto_clicker_party_commands_total counter',
+        ...Object.entries(commandTotals).map(([command, total]) => `auto_clicker_party_commands_total{command="${command}"} ${total}`),
+        '# HELP auto_clicker_party_metrics_scrapes_total Prometheus metrics endpoint scrapes.',
+        '# TYPE auto_clicker_party_metrics_scrapes_total counter',
+        `auto_clicker_party_metrics_scrapes_total ${metricsScrapesTotal}`
+    ];
+    response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(`${lines.join('\n')}\n`);
 }
 
 function readJson(request) {
@@ -156,6 +196,7 @@ function connectClient(client, message) {
             countdownTimer: null
         });
         clientInfo.set(client, { roomCode: code, role: 'host' });
+        acceptedConnectionsTotal++;
         send(client, { type: 'welcome', role: 'host', roomCode: code, participants: 1 });
         return;
     }
@@ -169,6 +210,7 @@ function connectClient(client, message) {
     const memberId = nextMemberId++;
     room.members.set(client, memberId);
     clientInfo.set(client, { roomCode: code, role: 'join', memberId });
+    acceptedConnectionsTotal++;
     send(client, { type: 'welcome', role: 'join', roomCode: code, participants: room.clients.size, memberId });
     send(room.host, { type: 'member-joined', memberId });
     announcePresence(room);
@@ -184,6 +226,7 @@ function handleMessage(client, message) {
     }
     if (info.role !== 'host') return send(client, { type: 'error', message: 'Only the host can send party commands.' });
     if (!validCommand(message)) return send(client, { type: 'error', message: 'Invalid party command.' });
+    commandTotals[message.command]++;
 
     if (message.command === 'config') {
         room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
@@ -237,6 +280,7 @@ const httpServer = http.createServer(async (request, response) => {
         return;
     }
     if (url.pathname === '/health') return writeJson(response, 200, { ok: true, rooms: rooms.size });
+    if (url.pathname === '/metrics') return writeMetrics(response);
     if (!url.pathname.startsWith('/api/party/')) return writeJson(response, 404, { error: 'Not found.' });
 
     try {

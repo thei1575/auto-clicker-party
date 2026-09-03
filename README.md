@@ -44,3 +44,7 @@ You can drag the panel by its title bar. Its position is remembered on future pa
 > Joined browsers should be on matching pages with the same button layout. The host's selected CSS selector must exist in every joined browser for synchronized clicking to work.
 
 The server keeps parties only in memory. Restarting it disconnects every party. The party code is the access key, so share it only with people who should be able to join. This is a coordination relay, not authentication or end-to-end encryption.
+
+## Monitoring
+
+The relay exposes Prometheus metrics at `/metrics`, including active rooms, connected browsers, scheduled countdowns, accepted connections, and host commands. A ready-to-use Netdata Go.d collector job is included at [`party-server/netdata-prometheus.conf`](./party-server/netdata-prometheus.conf).
