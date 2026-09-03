@@ -13,7 +13,6 @@ const MAX_MESSAGE_SIZE = 8 * 1024;
 const LONG_POLL_MS = 2_000;
 const HTTP_CLIENT_TTL_MS = 70_000;
 const MEMBER_STATUS_FLUSH_MS = 1_000;
-const COUNTDOWN_SYNC_BUFFER_MS = 5_000;
 let nextMemberId = 1;
 let acceptedConnectionsTotal = 0;
 let metricsScrapesTotal = 0;
@@ -245,6 +244,11 @@ function handleMessage(client, message) {
     const info = clientInfo.get(client);
     const room = info && rooms.get(info.roomCode);
     if (!room) return send(client, { type: 'error', message: 'Join a party first.' });
+    if (message.type === 'time-sync') {
+        if (!Number.isFinite(message.clientSentAt)) return send(client, { type: 'error', message: 'Invalid time sync request.' });
+        return { type: 'time-sync', clientSentAt: message.clientSentAt, serverTime: Date.now() };
+    }
+    if (message.type === 'time-sync-ack') return;
     if (info.role === 'join' && validMemberStatus(message)) {
         queueMemberStatus(room, info.memberId, message);
         return;
@@ -272,7 +276,7 @@ function handleMessage(client, message) {
         clearTimeout(room.countdownTimer);
         room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
         room.state.running = false;
-        room.state.scheduledStartAt = Date.now() + message.delayMs + COUNTDOWN_SYNC_BUFFER_MS;
+        room.state.scheduledStartAt = Date.now() + message.delayMs;
         room.countdownTimer = setTimeout(() => {
             if (rooms.get(info.roomCode) !== room || !room.state.scheduledStartAt) return;
             room.countdownTimer = null;
@@ -286,7 +290,7 @@ function handleMessage(client, message) {
                 targetSelector: room.state.config.targetSelector,
                 revision: room.state.revision
             });
-        }, message.delayMs + COUNTDOWN_SYNC_BUFFER_MS);
+        }, message.delayMs);
     }
 
     room.state.revision++;
@@ -295,6 +299,7 @@ function handleMessage(client, message) {
         ...(message.command === 'countdown' ? { startAt: room.state.scheduledStartAt } : {}),
         revision: room.state.revision
     }, client);
+    if (message.command === 'countdown') return { startAt: room.state.scheduledStartAt };
 }
 
 const httpServer = http.createServer(async (request, response) => {
@@ -328,8 +333,8 @@ const httpServer = http.createServer(async (request, response) => {
         client.lastSeen = Date.now();
 
         if (url.pathname === '/api/party/message' && request.method === 'POST') {
-            handleMessage(client, await readJson(request));
-            return writeJson(response, 204);
+            const result = handleMessage(client, await readJson(request));
+            return writeJson(response, 200, result || {});
         }
         if (url.pathname === '/api/party/disconnect' && request.method === 'POST') {
             removeFromRoom(client);
@@ -380,7 +385,10 @@ wss.on('connection', socket => {
     socket.on('error', () => {});
     socket.on('message', (data, isBinary) => {
         if (isBinary || data.length > MAX_MESSAGE_SIZE) return socket.close(1003, 'Text messages only');
-        try { handleMessage(socket, JSON.parse(data.toString())); } catch { send(socket, { type: 'error', message: 'Invalid JSON message.' }); }
+        try {
+            const result = handleMessage(socket, JSON.parse(data.toString()));
+            if (result) send(socket, result);
+        } catch { send(socket, { type: 'error', message: 'Invalid JSON message.' }); }
     });
     socket.on('close', () => removeFromRoom(socket));
 });

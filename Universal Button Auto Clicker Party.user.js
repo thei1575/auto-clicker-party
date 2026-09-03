@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.2.2
+// @version      3.3.0
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -28,7 +28,7 @@
     const SETTINGS_KEY = 'universalAutoClickerPartySettings';
     const PANEL_POSITION_KEY = 'universalAutoClickerPartyPanelPosition';
     const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
-    const COUNTDOWN_SYNC_BUFFER_MS = 5_000;
+    const SYNC_COUNTDOWN_MS = 5_000;
     const PARTY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const TARGET_ATTRIBUTE = 'data-auto-clicker-target';
     const HOVER_ATTRIBUTE = 'data-auto-clicker-hover';
@@ -40,6 +40,7 @@
     let selecting = false;
     let timer = null;
     let countdownTimer = null;
+    let countdownDisplayTimer = null;
     let countdownStartAt = null;
     let clicksCompleted = 0;
     let clicksPlanned = 0;
@@ -49,6 +50,8 @@
     let connectionTimer = null;
     let reconnectTimer = null;
     let reconnectAttempt = 0;
+    let serverClockOffsetMs = 0;
+    let clockSynced = false;
     let partySendChain = Promise.resolve();
     let lastGuestReport = { state: '', time: 0 };
     let lastPartyRevision = 0;
@@ -168,7 +171,6 @@
                         <label>Base delay (ms)<input id="delay" type="number" min="${MIN_DELAY}" step="10" value="1000"></label>
                         <label>Randomize ± (ms)<input id="randomization" type="number" min="0" step="10" value="0"></label>
                         <label class="full">Number of clicks<input id="count" type="number" min="0" step="1" value="10"><div class="hint">0 = unlimited clicks</div></label>
-                        <label class="full host-only" id="countdown-field" hidden>Start countdown (seconds)<input id="countdown" type="number" min="0" max="60" step="1" value="0"><div class="hint">0 starts immediately. Countdown adds a 5-second sync buffer for joined browsers.</div></label>
                     </div>
                     <div class="buttons"><button class="action" id="start">Start</button><button class="action" id="stop" disabled>Stop</button></div>
                 </div>
@@ -182,7 +184,7 @@
         'join-form', 'join-code', 'connect-join', 'mode-status', 'back', 'mode-label',
         'host-card', 'party-code', 'copy-code', 'party-status', 'member-card', 'member-count', 'party-progress', 'member-list',
         'join-card', 'target', 'selection-controls', 'select', 'control-settings', 'delay',
-        'randomization', 'count', 'countdown-field', 'countdown', 'start', 'stop', 'status'
+        'randomization', 'count', 'start', 'stop', 'status'
     ].map(id => [id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), shadow.getElementById(id)]));
 
     function setStatus(message, type = '') {
@@ -279,19 +281,17 @@
         ui.joinCard.hidden = !isJoin;
         ui.selectionControls.hidden = isJoin;
         ui.controlSettings.hidden = isJoin;
-        ui.countdownField.hidden = !isHost;
         updateControls();
     }
 
     function updateControls() {
         const joined = mode === 'join';
         const running = timer !== null || countdownTimer !== null;
-        const hostConnecting = mode === 'host' && !partyConnected();
+        const hostConnecting = mode === 'host' && (!partyConnected() || !clockSynced);
         ui.select.disabled = running || joined;
         ui.delay.disabled = running || joined;
         ui.randomization.disabled = running || joined;
         ui.count.disabled = running || joined;
-        ui.countdown.disabled = running || joined;
         ui.start.disabled = running || joined || hostConnecting;
         ui.stop.disabled = !running || joined;
     }
@@ -340,6 +340,8 @@
         partyCode = '';
         lastGuestReport = { state: '', time: 0 };
         lastPartyRevision = 0;
+        serverClockOffsetMs = 0;
+        clockSynced = false;
         hideJoinedTargetMarker();
         memberStats.clear();
     }
@@ -380,21 +382,45 @@
 
     function cancelCountdown() {
         if (countdownTimer !== null) clearTimeout(countdownTimer);
+        if (countdownDisplayTimer !== null) clearInterval(countdownDisplayTimer);
         countdownTimer = null;
+        countdownDisplayTimer = null;
         countdownStartAt = null;
     }
 
-    function scheduleCountdown(startAt) {
+    function refreshCountdownStatus() {
+        if (countdownStartAt === null) return;
+        const remaining = Math.max(0, countdownStartAt - serverClockOffsetMs - Date.now());
+        setStatus(`Synchronized start in ${Math.ceil(remaining / 1_000)}…`, 'running');
+    }
+
+    function scheduleCountdown(serverStartAt) {
         cancelCountdown();
-        const delay = Math.max(0, startAt - Date.now());
-        countdownStartAt = startAt;
-        setStatus(`Starting in ${Math.ceil(delay / 1_000)} seconds…`, 'running');
+        const delay = Math.max(0, serverStartAt - serverClockOffsetMs - Date.now());
+        countdownStartAt = serverStartAt;
+        refreshCountdownStatus();
+        countdownDisplayTimer = setInterval(refreshCountdownStatus, 100);
         countdownTimer = setTimeout(() => {
-            countdownTimer = null;
-            countdownStartAt = null;
+            cancelCountdown();
             startClicking(true);
         }, delay);
         updateControls();
+    }
+
+    async function startSynchronizedCountdown() {
+        if (!httpParty || !partyRole || !clockSynced) return;
+        const session = httpParty;
+        setStatus('Scheduling synchronized start…', 'running');
+        updateControls();
+        try {
+            const response = await partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, getPartyCountdownCommand(SYNC_COUNTDOWN_MS));
+            const result = JSON.parse(response.responseText || '{}');
+            if (httpParty !== session || !Number.isFinite(result.startAt)) throw new Error('Invalid countdown response');
+            scheduleCountdown(result.startAt);
+        } catch (_) {
+            setStatus('Could not schedule the synchronized start.', 'error');
+            updateControls();
+        }
     }
 
     function syncHostConfig() {
@@ -429,6 +455,7 @@
         httpParty = null;
         partyRole = null;
         lastPartyRevision = 0;
+        clockSynced = false;
         if (mode === 'join') stopClicking('Connection lost. Reconnecting…');
         if (role === 'host') ui.partyStatus.textContent = 'Reconnecting…';
         else setStatus('Connection lost. Reconnecting…', 'error');
@@ -463,6 +490,26 @@
         });
     }
 
+    async function synchronizePartyClock(session) {
+        const clientSentAt = Date.now();
+        const response = await partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, {
+            type: 'time-sync',
+            clientSentAt
+        });
+        const clientReceivedAt = Date.now();
+        const result = JSON.parse(response.responseText || '{}');
+        if (result.type !== 'time-sync' || !Number.isFinite(result.serverTime)) throw new Error('Invalid time sync response');
+        serverClockOffsetMs = result.serverTime - ((clientSentAt + clientReceivedAt) / 2);
+        clockSynced = true;
+        partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, {
+            type: 'time-sync-ack',
+            clientSentAt,
+            clientReceivedAt
+        }).catch(() => {});
+        if (partyRole === 'host') ui.partyStatus.textContent = 'Synchronized — ready.';
+        updateControls();
+    }
+
     async function startHttpParty(role, roomCode, reconnecting = false) {
         if (partyRole || httpParty) return;
         clearConnectionTimer();
@@ -476,6 +523,7 @@
             httpParty = session;
             handlePartyMessage(session, JSON.stringify(result.message));
             reconnectAttempt = 0;
+            await synchronizePartyClock(session);
             applyPartyState(result.state);
             pollHttpParty(session);
         } catch (_) {
@@ -872,18 +920,8 @@
         if (validationError) { setStatus(validationError, 'error'); return; }
         if (!resolveTarget()) { setStatus('Select a button first', 'error'); return; }
         if (mode === 'host') {
-            const countdownSeconds = Number(ui.countdown.value);
-            if (!Number.isInteger(countdownSeconds) || countdownSeconds < 0 || countdownSeconds > 60) {
-                setStatus('Countdown must be a whole number from 0 to 60 seconds.', 'error');
-                return;
-            }
-            if (countdownSeconds > 0) {
-                const delayMs = countdownSeconds * 1_000;
-                sendParty(getPartyCountdownCommand(delayMs));
-                scheduleCountdown(Date.now() + delayMs + COUNTDOWN_SYNC_BUFFER_MS);
-                return;
-            }
-            sendParty(getPartyStartCommand());
+            startSynchronizedCountdown();
+            return;
         }
         startClicking();
     });
