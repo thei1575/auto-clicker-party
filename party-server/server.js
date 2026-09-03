@@ -162,7 +162,8 @@ function queueMemberStatus(room, memberId, message) {
     room.pendingMemberStatuses.set(memberId, {
         state: message.state,
         clicks: message.clicks,
-        total: message.total
+        total: message.total,
+        clockOffsetMs: message.clockOffsetMs
     });
     if (room.memberStatusFlushTimer === null) {
         room.memberStatusFlushTimer = setTimeout(() => flushMemberStatuses(room), MEMBER_STATUS_FLUSH_MS);
@@ -178,12 +179,16 @@ function validConfig(message) {
         typeof message.targetSelector === 'string' && message.targetSelector.length <= 2048;
 }
 
+function validRun(run) {
+    return run && Number.isInteger(run.seed) && run.seed >= 0 && run.seed <= 0xFFFFFFFF;
+}
+
 function validCommand(message) {
     if (message.type !== 'command') return false;
     if (message.command === 'stop') return true;
     if (message.command === 'config') return validConfig(message);
     if (message.command === 'start') return !message.settings || validConfig(message);
-    return message.command === 'countdown' && validConfig(message) &&
+    return message.command === 'countdown' && validConfig(message) && validRun(message.run) &&
         Number.isInteger(message.delayMs) && message.delayMs >= 1_000 && message.delayMs <= 60_000;
 }
 
@@ -191,7 +196,8 @@ function validMemberStatus(message) {
     return message.type === 'client-status' &&
         typeof message.state === 'string' && message.state.length <= 80 &&
         Number.isInteger(message.clicks) && message.clicks >= 0 &&
-        (message.total === null || (Number.isInteger(message.total) && message.total >= 0));
+        (message.total === null || (Number.isInteger(message.total) && message.total >= 0)) &&
+        Number.isFinite(message.clockOffsetMs) && Math.abs(message.clockOffsetMs) <= 300_000;
 }
 
 function connectClient(client, message) {
@@ -214,7 +220,7 @@ function connectClient(client, message) {
             host: client,
             clients: new Set([client]),
             members: new Map(),
-            state: { revision: 0, running: false, config: null, scheduledStartAt: null },
+            state: { revision: 0, running: false, config: null, run: null, scheduledStartAt: null },
             countdownTimer: null,
             pendingMemberStatuses: new Map(),
             memberStatusFlushTimer: null
@@ -263,6 +269,7 @@ function handleMessage(client, message) {
         clearTimeout(room.countdownTimer);
         room.countdownTimer = null;
         room.state.scheduledStartAt = null;
+        room.state.run = message.run || null;
         if (message.settings && typeof message.targetSelector === 'string') {
             room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
         }
@@ -271,12 +278,14 @@ function handleMessage(client, message) {
         clearTimeout(room.countdownTimer);
         room.countdownTimer = null;
         room.state.scheduledStartAt = null;
+        room.state.run = null;
         room.state.running = false;
     } else if (message.command === 'countdown') {
         clearTimeout(room.countdownTimer);
         room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
         room.state.running = false;
         room.state.scheduledStartAt = Date.now() + message.delayMs;
+        room.state.run = { ...message.run, startAt: room.state.scheduledStartAt };
         room.countdownTimer = setTimeout(() => {
             if (rooms.get(info.roomCode) !== room || !room.state.scheduledStartAt) return;
             room.countdownTimer = null;
@@ -288,6 +297,7 @@ function handleMessage(client, message) {
                 command: 'start',
                 settings: room.state.config.settings,
                 targetSelector: room.state.config.targetSelector,
+                run: room.state.run,
                 revision: room.state.revision
             });
         }, message.delayMs);
@@ -296,10 +306,10 @@ function handleMessage(client, message) {
     room.state.revision++;
     broadcast(room, {
         ...message,
-        ...(message.command === 'countdown' ? { startAt: room.state.scheduledStartAt } : {}),
+        ...(message.command === 'countdown' ? { startAt: room.state.scheduledStartAt, run: room.state.run } : {}),
         revision: room.state.revision
     }, client);
-    if (message.command === 'countdown') return { startAt: room.state.scheduledStartAt };
+    if (message.command === 'countdown') return { startAt: room.state.scheduledStartAt, run: room.state.run };
 }
 
 const httpServer = http.createServer(async (request, response) => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.3.0
+// @version      3.4.0
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -42,6 +42,9 @@
     let countdownTimer = null;
     let countdownDisplayTimer = null;
     let countdownStartAt = null;
+    let runPlan = null;
+    let syncedRandomState = 0;
+    let nextClickAt = null;
     let clicksCompleted = 0;
     let clicksPlanned = 0;
     let httpParty = null;
@@ -52,6 +55,7 @@
     let reconnectAttempt = 0;
     let serverClockOffsetMs = 0;
     let clockSynced = false;
+    let clockSyncTimer = null;
     let partySendChain = Promise.resolve();
     let lastGuestReport = { state: '', time: 0 };
     let lastPartyRevision = 0;
@@ -342,6 +346,8 @@
         lastPartyRevision = 0;
         serverClockOffsetMs = 0;
         clockSynced = false;
+        if (clockSyncTimer !== null) clearInterval(clockSyncTimer);
+        clockSyncTimer = null;
         hideJoinedTargetMarker();
         memberStats.clear();
     }
@@ -376,8 +382,8 @@
         return { type: 'command', command: 'start', settings: getSettings(), targetSelector };
     }
 
-    function getPartyCountdownCommand(delayMs) {
-        return { type: 'command', command: 'countdown', delayMs, settings: getSettings(), targetSelector };
+    function getPartyCountdownCommand(delayMs, run) {
+        return { type: 'command', command: 'countdown', delayMs, settings: getSettings(), targetSelector, run };
     }
 
     function cancelCountdown() {
@@ -394,7 +400,7 @@
         setStatus(`Synchronized start in ${Math.ceil(remaining / 1_000)}…`, 'running');
     }
 
-    function scheduleCountdown(serverStartAt) {
+    function scheduleCountdown(serverStartAt, plan) {
         cancelCountdown();
         const delay = Math.max(0, serverStartAt - serverClockOffsetMs - Date.now());
         countdownStartAt = serverStartAt;
@@ -402,7 +408,7 @@
         countdownDisplayTimer = setInterval(refreshCountdownStatus, 100);
         countdownTimer = setTimeout(() => {
             cancelCountdown();
-            startClicking(true);
+            startClicking(true, plan);
         }, delay);
         updateControls();
     }
@@ -410,13 +416,16 @@
     async function startSynchronizedCountdown() {
         if (!httpParty || !partyRole || !clockSynced) return;
         const session = httpParty;
+        const seed = new Uint32Array(1);
+        crypto.getRandomValues(seed);
+        const run = { seed: seed[0] };
         setStatus('Scheduling synchronized start…', 'running');
         updateControls();
         try {
-            const response = await partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, getPartyCountdownCommand(SYNC_COUNTDOWN_MS));
+            const response = await partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, getPartyCountdownCommand(SYNC_COUNTDOWN_MS, run));
             const result = JSON.parse(response.responseText || '{}');
-            if (httpParty !== session || !Number.isFinite(result.startAt)) throw new Error('Invalid countdown response');
-            scheduleCountdown(result.startAt);
+            if (httpParty !== session || !Number.isFinite(result.startAt) || !result.run) throw new Error('Invalid countdown response');
+            scheduleCountdown(result.startAt, result.run);
         } catch (_) {
             setStatus('Could not schedule the synchronized start.', 'error');
             updateControls();
@@ -456,6 +465,8 @@
         partyRole = null;
         lastPartyRevision = 0;
         clockSynced = false;
+        if (clockSyncTimer !== null) clearInterval(clockSyncTimer);
+        clockSyncTimer = null;
         if (mode === 'join') stopClicking('Connection lost. Reconnecting…');
         if (role === 'host') ui.partyStatus.textContent = 'Reconnecting…';
         else setStatus('Connection lost. Reconnecting…', 'error');
@@ -507,7 +518,17 @@
             clientReceivedAt
         }).catch(() => {});
         if (partyRole === 'host') ui.partyStatus.textContent = 'Synchronized — ready.';
+        if (partyRole === 'host') renderMemberStats();
+        if (partyRole === 'join') reportGuest(timer !== null || countdownTimer !== null ? 'Running' : 'Ready');
         updateControls();
+    }
+
+    function beginClockResync(session) {
+        if (clockSyncTimer !== null) clearInterval(clockSyncTimer);
+        clockSyncTimer = setInterval(() => {
+            if (httpParty !== session || session.closed || !partyRole) return;
+            synchronizePartyClock(session).catch(() => {});
+        }, 15_000);
     }
 
     async function startHttpParty(role, roomCode, reconnecting = false) {
@@ -525,6 +546,7 @@
             reconnectAttempt = 0;
             await synchronizePartyClock(session);
             applyPartyState(result.state);
+            beginClockResync(session);
             pollHttpParty(session);
         } catch (_) {
             if (reconnecting) schedulePartyReconnect(role, roomCode);
@@ -574,7 +596,8 @@
             row.className = 'member';
             const name = document.createElement('span');
             const progress = document.createElement('span');
-            name.textContent = `Browser ${id}: ${stats.state}`;
+            const diff = Number.isFinite(stats.timeDiffMs) ? ` · clock ${stats.timeDiffMs >= 0 ? '+' : ''}${Math.round(stats.timeDiffMs)} ms` : '';
+            name.textContent = `Browser ${id}: ${stats.state}${diff}`;
             const total = stats.total === null ? '∞' : stats.total;
             progress.textContent = `${stats.clicks} / ${total} · ${(stats.rate || 0).toFixed(1)}/s`;
             row.append(name, progress);
@@ -598,7 +621,7 @@
         const now = Date.now();
         if (state === 'Running' && lastGuestReport.state === state && now - lastGuestReport.time < 500) return;
         lastGuestReport = { state, time: now };
-        sendParty({ type: 'client-status', state, clicks: clicksCompleted, total: clicksPlanned === 0 ? null : clicksPlanned });
+        sendParty({ type: 'client-status', state, clicks: clicksCompleted, total: clicksPlanned === 0 ? null : clicksPlanned, clockOffsetMs: serverClockOffsetMs });
     }
 
     function handlePartyMessage(sourceSocket, rawMessage) {
@@ -639,7 +662,14 @@
             const elapsed = now - (previous?.updatedAt || now);
             const clickDelta = message.clicks - (previous?.clicks || 0);
             const rate = elapsed > 0 && clickDelta >= 0 ? clickDelta * 1_000 / elapsed : 0;
-            memberStats.set(message.memberId, { state: message.state, clicks: message.clicks, total: message.total, rate, updatedAt: now });
+            memberStats.set(message.memberId, {
+                state: message.state,
+                clicks: message.clicks,
+                total: message.total,
+                rate,
+                updatedAt: now,
+                timeDiffMs: Number.isFinite(message.clockOffsetMs) ? message.clockOffsetMs - serverClockOffsetMs : null
+            });
             renderMemberStats();
             return;
         }
@@ -648,11 +678,11 @@
             if (message.command === 'config') applyPartyConfig(message);
             if (message.command === 'start') {
                 if (message.settings && typeof message.targetSelector === 'string') applyPartyConfig(message);
-                startClicking(true);
+                startClicking(true, message.run || null);
             }
             if (message.command === 'countdown') {
                 applyPartyConfig(message);
-                if (Number.isFinite(message.startAt)) scheduleCountdown(message.startAt);
+                if (Number.isFinite(message.startAt) && message.run) scheduleCountdown(message.startAt, message.run);
             }
             if (message.command === 'stop') stopClicking('Stopped by host');
             return;
@@ -670,8 +700,8 @@
         if (partyRole !== 'join' || !state || !Number.isInteger(state.revision) || state.revision <= lastPartyRevision) return;
         lastPartyRevision = state.revision;
         if (state.config) applyPartyConfig(state.config);
-        if (state.running) startClicking(true);
-        else if (Number.isFinite(state.scheduledStartAt)) scheduleCountdown(state.scheduledStartAt);
+        if (state.running) startClicking(true, state.run || null);
+        else if (Number.isFinite(state.scheduledStartAt) && state.run) scheduleCountdown(state.scheduledStartAt, state.run);
         else stopClicking('Stopped by host');
     }
 
@@ -825,12 +855,20 @@
     function getRandomDelay() {
         const minimum = Math.max(MIN_DELAY, Number(ui.delay.value) - Number(ui.randomization.value));
         const maximum = Math.max(minimum, Number(ui.delay.value) + Number(ui.randomization.value));
-        return Math.round(minimum + Math.random() * (maximum - minimum));
+        if (!runPlan) return Math.round(minimum + Math.random() * (maximum - minimum));
+        // xorshift32 gives every browser the same delay sequence from the shared run seed.
+        syncedRandomState ^= syncedRandomState << 13;
+        syncedRandomState ^= syncedRandomState >>> 17;
+        syncedRandomState ^= syncedRandomState << 5;
+        const fraction = (syncedRandomState >>> 0) / 0x100000000;
+        return Math.round(minimum + fraction * (maximum - minimum));
     }
 
     function stopClicking(message = 'Stopped') {
         cancelCountdown();
         if (timer !== null) { clearTimeout(timer); timer = null; }
+        runPlan = null;
+        nextClickAt = null;
         updateControls();
         if (mode === 'host') renderMemberStats();
         if (message) setStatus(message);
@@ -840,8 +878,13 @@
     function scheduleNextClick() {
         const nextDelay = getRandomDelay();
         const total = clicksPlanned === 0 ? '∞' : clicksPlanned;
-        setStatus(`Running: ${clicksCompleted} / ${total} — next in ${nextDelay} ms`, 'running');
-        timer = setTimeout(performClick, nextDelay);
+        let wait = nextDelay;
+        if (runPlan) {
+            nextClickAt += nextDelay;
+            wait = Math.max(0, nextClickAt - serverClockOffsetMs - Date.now());
+        }
+        setStatus(`Running: ${clicksCompleted} / ${total} — next in ${Math.ceil(wait)} ms`, 'running');
+        timer = setTimeout(performClick, wait);
         updateControls();
         if (mode === 'join') reportGuest('Running');
     }
@@ -874,7 +917,7 @@
         return '';
     }
 
-    function startClicking(fromHost = false) {
+    function startClicking(fromHost = false, synchronizedPlan = null) {
         if (timer !== null) return;
         if (mode === 'join' && !fromHost) return;
         cancelCountdown();
@@ -884,6 +927,9 @@
         saveSettings();
         clicksCompleted = 0;
         clicksPlanned = Number(ui.count.value);
+        runPlan = synchronizedPlan && Number.isInteger(synchronizedPlan.seed) && Number.isFinite(synchronizedPlan.startAt) ? synchronizedPlan : null;
+        syncedRandomState = runPlan ? (runPlan.seed || 0x6D2B79F5) : 0;
+        nextClickAt = runPlan ? runPlan.startAt : null;
         if (mode === 'host') {
             hostRateSample = { clicks: 0, time: Date.now(), rate: 0 };
             renderMemberStats();
