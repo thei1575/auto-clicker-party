@@ -8,8 +8,9 @@ const clientInfo = new Map();
 const httpClients = new Map();
 const roomCodePattern = /^[A-Z2-9]{6,16}$/;
 const MAX_MESSAGE_SIZE = 8 * 1024;
-const LONG_POLL_MS = 2_000;
+const LONG_POLL_MS = 25_000;
 const HTTP_CLIENT_TTL_MS = 70_000;
+const MEMBER_STATUS_FLUSH_MS = 1_000;
 let nextMemberId = 1;
 let acceptedConnectionsTotal = 0;
 let metricsScrapesTotal = 0;
@@ -92,7 +93,9 @@ function send(client, message) {
         }
         return;
     }
-    if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
+    if (client.readyState === WebSocket.OPEN) {
+        try { client.send(JSON.stringify(message)); } catch { /* A concurrently closed socket needs no further action. */ }
+    }
 }
 
 function partyState(client) {
@@ -103,10 +106,6 @@ function partyState(client) {
 
 function broadcast(room, message, except = null) {
     for (const client of room.clients) if (client !== except) send(client, message);
-}
-
-function announcePresence(room) {
-    broadcast(room, { type: 'presence', participants: room.clients.size });
 }
 
 function closeHttpWait(client) {
@@ -128,6 +127,7 @@ function removeFromRoom(client) {
     room.clients.delete(client);
     if (room.host === client) {
         clearTimeout(room.countdownTimer);
+        clearTimeout(room.memberStatusFlushTimer);
         broadcast(room, { type: 'party-ended', message: 'The host disconnected. This party has ended.' });
         for (const member of room.clients) {
             clientInfo.delete(member);
@@ -141,10 +141,30 @@ function removeFromRoom(client) {
         rooms.delete(info.roomCode);
     } else {
         room.members.delete(client);
+        room.pendingMemberStatuses.delete(info.memberId);
         send(room.host, { type: 'member-left', memberId: info.memberId });
-        announcePresence(room);
     }
     clientInfo.delete(client);
+}
+
+function flushMemberStatuses(room) {
+    room.memberStatusFlushTimer = null;
+    if (!room.host || room.pendingMemberStatuses.size === 0) return;
+    for (const [memberId, status] of room.pendingMemberStatuses) {
+        send(room.host, { type: 'member-status', memberId, ...status });
+    }
+    room.pendingMemberStatuses.clear();
+}
+
+function queueMemberStatus(room, memberId, message) {
+    room.pendingMemberStatuses.set(memberId, {
+        state: message.state,
+        clicks: message.clicks,
+        total: message.total
+    });
+    if (room.memberStatusFlushTimer === null) {
+        room.memberStatusFlushTimer = setTimeout(() => flushMemberStatuses(room), MEMBER_STATUS_FLUSH_MS);
+    }
 }
 
 function validConfig(message) {
@@ -193,7 +213,9 @@ function connectClient(client, message) {
             clients: new Set([client]),
             members: new Map(),
             state: { revision: 0, running: false, config: null, scheduledStartAt: null },
-            countdownTimer: null
+            countdownTimer: null,
+            pendingMemberStatuses: new Map(),
+            memberStatusFlushTimer: null
         });
         clientInfo.set(client, { roomCode: code, role: 'host' });
         acceptedConnectionsTotal++;
@@ -213,7 +235,6 @@ function connectClient(client, message) {
     acceptedConnectionsTotal++;
     send(client, { type: 'welcome', role: 'join', roomCode: code, participants: room.clients.size, memberId });
     send(room.host, { type: 'member-joined', memberId });
-    announcePresence(room);
 }
 
 function handleMessage(client, message) {
@@ -222,7 +243,8 @@ function handleMessage(client, message) {
     const room = info && rooms.get(info.roomCode);
     if (!room) return send(client, { type: 'error', message: 'Join a party first.' });
     if (info.role === 'join' && validMemberStatus(message)) {
-        return send(room.host, { type: 'member-status', memberId: info.memberId, state: message.state, clicks: message.clicks, total: message.total });
+        queueMemberStatus(room, info.memberId, message);
+        return;
     }
     if (info.role !== 'host') return send(client, { type: 'error', message: 'Only the host can send party commands.' });
     if (!validCommand(message)) return send(client, { type: 'error', message: 'Invalid party command.' });
@@ -337,6 +359,12 @@ const httpServer = http.createServer(async (request, response) => {
         return writeJson(response, 400, { error: error.message || 'Invalid request.' });
     }
 });
+
+// Keep connections warm across successive long-poll requests. This avoids a TCP/TLS
+// reconnect storm when a large party is idle, while the proxy remains the public edge.
+httpServer.keepAliveTimeout = 60_000;
+httpServer.headersTimeout = 65_000;
+httpServer.requestTimeout = 60_000;
 
 const wss = new WebSocketServer({ server: httpServer, maxPayload: MAX_MESSAGE_SIZE, perMessageDeflate: false });
 wss.on('connection', socket => {
