@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.1.4
+// @version      3.1.5
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -92,6 +92,8 @@
             #choose-host { background:#7c3aed; }
             #stop { background:#dc2626; }
             .card { margin-bottom:10px; padding:10px; background:#111c31; border:1px solid #334155; border-radius:9px; }
+            #join-form { margin-top:12px; margin-bottom:0; }
+            #join-form .action { width:100%; margin-top:12px; }
             .card-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:7px; color:#bfdbfe; font-weight:700; }
             .target { min-height:34px; margin-bottom:9px; padding:8px 9px; overflow:hidden; color:#94a3b8; background:#0f172a; border:1px solid #334155; border-radius:8px; text-overflow:ellipsis; white-space:nowrap; }
             .target.selected { color:#a7f3d0; border-color:#059669; }
@@ -127,7 +129,7 @@
                 </div>
                 <div class="card" id="join-form" hidden>
                     <label>Party code<input id="join-code" maxlength="16" placeholder="Enter host code"></label>
-                    <button class="action" id="connect-join" style="width:100%;margin-top:9px">Join party</button>
+                    <button class="action" id="connect-join">Join party</button>
                 </div>
                 <div class="status" id="mode-status">Local controls stay in this browser. Host controls sync to joined browsers.</div>
             </section>
