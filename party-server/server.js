@@ -8,7 +8,9 @@ const clientInfo = new Map();
 const httpClients = new Map();
 const roomCodePattern = /^[A-Z2-9]{6,16}$/;
 const MAX_MESSAGE_SIZE = 8 * 1024;
-const LONG_POLL_MS = 25_000;
+// Tampermonkey's request bridge is more reliable with frequent poll completion.
+// Commands are still delivered immediately when a poll is held open.
+const LONG_POLL_MS = 2_000;
 const HTTP_CLIENT_TTL_MS = 70_000;
 const MEMBER_STATUS_FLUSH_MS = 1_000;
 let nextMemberId = 1;
