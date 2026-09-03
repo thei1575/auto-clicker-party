@@ -1,0 +1,23 @@
+[Unit]
+Description=Auto Clicker Party WebSocket relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=auto-clicker-party
+Group=auto-clicker-party
+WorkingDirectory=/opt/auto-clicker-party
+Environment=NODE_ENV=production
+Environment=PORT=8787
+ExecStart=/usr/bin/node /opt/auto-clicker-party/server.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
