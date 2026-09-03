@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.0.1
+// @version      3.0.2
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @match        http://*/*
@@ -264,6 +264,10 @@
         return { type: 'command', command: 'config', settings: getSettings(), targetSelector };
     }
 
+    function getPartyStartCommand() {
+        return { type: 'command', command: 'start', settings: getSettings(), targetSelector };
+    }
+
     function syncHostConfig() {
         if (partyRole === 'host') sendParty(getPartyConfig());
     }
@@ -430,8 +434,8 @@
         if (message.type === 'member-joined' && partyRole === 'host') {
             memberStats.set(message.memberId, { state: 'Joining…', clicks: 0, total: null });
             renderMemberStats();
-            syncHostConfig();
-            if (timer !== null) sendParty({ type: 'command', command: 'start' });
+            if (timer !== null) sendParty(getPartyStartCommand());
+            else syncHostConfig();
             return;
         }
         if (message.type === 'member-left' && partyRole === 'host') {
@@ -446,7 +450,10 @@
         }
         if (message.type === 'command' && partyRole === 'join') {
             if (message.command === 'config') applyPartyConfig(message);
-            if (message.command === 'start') startClicking(true);
+            if (message.command === 'start') {
+                if (message.settings && typeof message.targetSelector === 'string') applyPartyConfig(message);
+                startClicking(true);
+            }
             if (message.command === 'stop') stopClicking('Stopped by host');
             return;
         }
@@ -668,8 +675,7 @@
         if (validationError) { setStatus(validationError, 'error'); return; }
         if (!resolveTarget()) { setStatus('Select a button first', 'error'); return; }
         if (mode === 'host') {
-            syncHostConfig();
-            sendParty({ type: 'command', command: 'start' });
+            sendParty(getPartyStartCommand());
         }
         startClicking();
     });
