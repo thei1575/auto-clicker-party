@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.1.6
+// @version      3.2.0
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -26,6 +26,7 @@
 
     const MIN_DELAY = 20;
     const SETTINGS_KEY = 'universalAutoClickerPartySettings';
+    const PANEL_POSITION_KEY = 'universalAutoClickerPartyPanelPosition';
     const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
     const PARTY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const TARGET_ATTRIBUTE = 'data-auto-clicker-target';
@@ -37,6 +38,8 @@
     let hoveredElement = null;
     let selecting = false;
     let timer = null;
+    let countdownTimer = null;
+    let countdownStartAt = null;
     let clicksCompleted = 0;
     let clicksPlanned = 0;
     let httpParty = null;
@@ -46,6 +49,7 @@
     let partySendChain = Promise.resolve();
     let lastGuestReport = { state: '', time: 0 };
     let lastPartyRevision = 0;
+    let hostRateSample = { clicks: 0, time: Date.now(), rate: 0 };
     let dragOffset = null;
     const memberStats = new Map();
 
@@ -116,6 +120,7 @@
             .party-status { color:#94a3b8; font-size:11px; }
             .member-list { display:grid; gap:5px; }
             .member { display:flex; justify-content:space-between; padding:6px 7px; color:#cbd5e1; background:#0f172a; border-radius:6px; font-size:11px; }
+            .party-progress { color:#86efac; font-size:10px; font-weight:500; }
             .readonly { color:#94a3b8; }
             .footer { margin-top:11px; padding-top:9px; color:#64748b; border-top:1px solid #243247; font-size:10px; text-align:center; }
             .footer a { color:#93c5fd; text-decoration:none; }
@@ -145,7 +150,8 @@
                     <div class="party-status" id="party-status">Connecting…</div>
                 </section>
                 <section class="card host-only" id="member-card" hidden>
-                    <div class="card-title"><span>Joined browsers</span><span id="member-count">0</span></div>
+                    <div class="card-title"><span>Party progress</span><span class="party-progress" id="party-progress">0 clicks · 0.0/s</span></div>
+                    <div class="party-status">Joined browsers: <span id="member-count">0</span></div>
                     <div class="member-list" id="member-list"><div class="readonly">No browsers joined yet.</div></div>
                 </section>
                 <section class="card join-only" id="join-card" hidden>
@@ -159,6 +165,7 @@
                         <label>Base delay (ms)<input id="delay" type="number" min="${MIN_DELAY}" step="10" value="1000"></label>
                         <label>Randomize ± (ms)<input id="randomization" type="number" min="0" step="10" value="0"></label>
                         <label class="full">Number of clicks<input id="count" type="number" min="0" step="1" value="10"><div class="hint">0 = unlimited clicks</div></label>
+                        <label class="full host-only" id="countdown-field" hidden>Start countdown (seconds)<input id="countdown" type="number" min="0" max="60" step="1" value="0"><div class="hint">0 starts immediately. Joined browsers start together.</div></label>
                     </div>
                     <div class="buttons"><button class="action" id="start">Start</button><button class="action" id="stop" disabled>Stop</button></div>
                 </div>
@@ -170,9 +177,9 @@
     const ui = Object.fromEntries([
         'panel', 'hide', 'minimize', 'drag-handle', 'mode-screen', 'control-screen', 'choose-local', 'choose-host', 'choose-join',
         'join-form', 'join-code', 'connect-join', 'mode-status', 'back', 'mode-label',
-        'host-card', 'party-code', 'copy-code', 'party-status', 'member-card', 'member-count', 'member-list',
+        'host-card', 'party-code', 'copy-code', 'party-status', 'member-card', 'member-count', 'party-progress', 'member-list',
         'join-card', 'target', 'selection-controls', 'select', 'control-settings', 'delay',
-        'randomization', 'count', 'start', 'stop', 'status'
+        'randomization', 'count', 'countdown-field', 'countdown', 'start', 'stop', 'status'
     ].map(id => [id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), shadow.getElementById(id)]));
 
     function setStatus(message, type = '') {
@@ -209,6 +216,7 @@
     }
 
     function stopDragging() {
+        if (dragOffset) savePanelPosition();
         dragOffset = null;
         window.removeEventListener('pointermove', dragWindow, true);
         window.removeEventListener('pointerup', stopDragging, true);
@@ -237,6 +245,19 @@
         ui.count.value = Number.isFinite(settings.count) ? settings.count : 10;
     }
 
+    function savePanelPosition() {
+        const rect = host.getBoundingClientRect();
+        GM_setValue(PANEL_POSITION_KEY, { left: Math.round(rect.left), top: Math.round(rect.top) });
+    }
+
+    function loadPanelPosition() {
+        const position = GM_getValue(PANEL_POSITION_KEY, null);
+        if (!position || !Number.isFinite(position.left) || !Number.isFinite(position.top)) return;
+        host.style.left = `${Math.max(0, Math.min(position.left, window.innerWidth - 80))}px`;
+        host.style.top = `${Math.max(0, Math.min(position.top, window.innerHeight - 40))}px`;
+        host.style.right = 'auto';
+    }
+
     function showModeScreen() {
         ui.modeScreen.hidden = false;
         ui.controlScreen.hidden = true;
@@ -255,17 +276,19 @@
         ui.joinCard.hidden = !isJoin;
         ui.selectionControls.hidden = isJoin;
         ui.controlSettings.hidden = isJoin;
+        ui.countdownField.hidden = !isHost;
         updateControls();
     }
 
     function updateControls() {
         const joined = mode === 'join';
-        const running = timer !== null;
+        const running = timer !== null || countdownTimer !== null;
         const hostConnecting = mode === 'host' && !partyConnected();
         ui.select.disabled = running || joined;
         ui.delay.disabled = running || joined;
         ui.randomization.disabled = running || joined;
         ui.count.disabled = running || joined;
+        ui.countdown.disabled = running || joined;
         ui.start.disabled = running || joined || hostConnecting;
         ui.stop.disabled = !running || joined;
     }
@@ -300,6 +323,7 @@
 
     function disconnectParty() {
         clearConnectionTimer();
+        cancelCountdown();
         const currentHttpParty = httpParty;
         httpParty = null;
         if (currentHttpParty) {
@@ -315,7 +339,7 @@
     }
 
     function leaveToModePicker() {
-        if (partyRole === 'host' && timer !== null) sendParty({ type: 'command', command: 'stop' });
+        if (partyRole === 'host' && (timer !== null || countdownTimer !== null)) sendParty({ type: 'command', command: 'stop' });
         stopClicking('Stopped');
         disconnectParty();
         mode = null;
@@ -342,6 +366,29 @@
 
     function getPartyStartCommand() {
         return { type: 'command', command: 'start', settings: getSettings(), targetSelector };
+    }
+
+    function getPartyCountdownCommand(delayMs) {
+        return { type: 'command', command: 'countdown', delayMs, settings: getSettings(), targetSelector };
+    }
+
+    function cancelCountdown() {
+        if (countdownTimer !== null) clearTimeout(countdownTimer);
+        countdownTimer = null;
+        countdownStartAt = null;
+    }
+
+    function scheduleCountdown(startAt) {
+        cancelCountdown();
+        const delay = Math.max(0, startAt - Date.now());
+        countdownStartAt = startAt;
+        setStatus(`Starting in ${Math.ceil(delay / 1_000)} seconds…`, 'running');
+        countdownTimer = setTimeout(() => {
+            countdownTimer = null;
+            countdownStartAt = null;
+            startClicking(true);
+        }, delay);
+        updateControls();
     }
 
     function syncHostConfig() {
@@ -424,6 +471,12 @@
 
     function renderMemberStats() {
         ui.memberCount.textContent = String(memberStats.size);
+        const members = Array.from(memberStats.values());
+        const totalClicks = clicksCompleted + members.reduce((total, stats) => total + stats.clicks, 0);
+        const hasUnlimited = clicksPlanned === 0 || members.some(stats => stats.total === null);
+        const totalPlanned = clicksPlanned + members.reduce((total, stats) => total + (stats.total || 0), 0);
+        const clickRate = hostRateSample.rate + members.reduce((total, stats) => total + (stats.rate || 0), 0);
+        ui.partyProgress.textContent = `${totalClicks}${hasUnlimited ? ' / ∞' : ` / ${totalPlanned}`} clicks · ${clickRate.toFixed(1)}/s`;
         ui.memberList.replaceChildren();
         if (memberStats.size === 0) {
             const empty = document.createElement('div');
@@ -438,10 +491,22 @@
             const name = document.createElement('span');
             const progress = document.createElement('span');
             name.textContent = `Browser ${id}: ${stats.state}`;
-            progress.textContent = stats.total === null ? `${stats.clicks} / ∞` : `${stats.clicks} / ${stats.total}`;
+            const total = stats.total === null ? '∞' : stats.total;
+            progress.textContent = `${stats.clicks} / ${total} · ${(stats.rate || 0).toFixed(1)}/s`;
             row.append(name, progress);
             ui.memberList.appendChild(row);
         }
+    }
+
+    function recordHostClick() {
+        if (mode !== 'host') return;
+        const now = Date.now();
+        const elapsed = now - hostRateSample.time;
+        const clickDelta = clicksCompleted - hostRateSample.clicks;
+        if (elapsed > 0 && clickDelta >= 0) hostRateSample.rate = clickDelta * 1_000 / elapsed;
+        hostRateSample.clicks = clicksCompleted;
+        hostRateSample.time = now;
+        renderMemberStats();
     }
 
     function reportGuest(state) {
@@ -473,7 +538,7 @@
             return;
         }
         if (message.type === 'member-joined' && partyRole === 'host') {
-            memberStats.set(message.memberId, { state: 'Joining…', clicks: 0, total: null });
+            memberStats.set(message.memberId, { state: 'Joining…', clicks: 0, total: null, rate: 0, updatedAt: Date.now() });
             renderMemberStats();
             if (timer !== null) sendParty(getPartyStartCommand());
             else syncHostConfig();
@@ -485,7 +550,12 @@
             return;
         }
         if (message.type === 'member-status' && partyRole === 'host') {
-            memberStats.set(message.memberId, { state: message.state, clicks: message.clicks, total: message.total });
+            const previous = memberStats.get(message.memberId);
+            const now = Date.now();
+            const elapsed = now - (previous?.updatedAt || now);
+            const clickDelta = message.clicks - (previous?.clicks || 0);
+            const rate = elapsed > 0 && clickDelta >= 0 ? clickDelta * 1_000 / elapsed : 0;
+            memberStats.set(message.memberId, { state: message.state, clicks: message.clicks, total: message.total, rate, updatedAt: now });
             renderMemberStats();
             return;
         }
@@ -495,6 +565,10 @@
             if (message.command === 'start') {
                 if (message.settings && typeof message.targetSelector === 'string') applyPartyConfig(message);
                 startClicking(true);
+            }
+            if (message.command === 'countdown') {
+                applyPartyConfig(message);
+                if (Number.isFinite(message.startAt)) scheduleCountdown(message.startAt);
             }
             if (message.command === 'stop') stopClicking('Stopped by host');
             return;
@@ -513,6 +587,7 @@
         lastPartyRevision = state.revision;
         if (state.config) applyPartyConfig(state.config);
         if (state.running) startClicking(true);
+        else if (Number.isFinite(state.scheduledStartAt)) scheduleCountdown(state.scheduledStartAt);
         else stopClicking('Stopped by host');
     }
 
@@ -670,8 +745,10 @@
     }
 
     function stopClicking(message = 'Stopped') {
+        cancelCountdown();
         if (timer !== null) { clearTimeout(timer); timer = null; }
         updateControls();
+        if (mode === 'host') renderMemberStats();
         if (message) setStatus(message);
         if (mode === 'join') reportGuest(message === 'Stopped by host' ? 'Stopped by host' : 'Stopped');
     }
@@ -696,6 +773,7 @@
         refreshJoinedTargetMarker();
         element.click();
         clicksCompleted++;
+        recordHostClick();
         if (clicksPlanned > 0 && clicksCompleted >= clicksPlanned) {
             stopClicking(`Finished ${clicksCompleted} ${clicksCompleted === 1 ? 'click' : 'clicks'}`);
             if (mode === 'join') reportGuest('Finished');
@@ -715,12 +793,17 @@
     function startClicking(fromHost = false) {
         if (timer !== null) return;
         if (mode === 'join' && !fromHost) return;
+        cancelCountdown();
         const validationError = validateSettings();
         if (validationError) { setStatus(validationError, 'error'); if (mode === 'join') reportGuest('Invalid host settings'); return; }
         if (!resolveTarget()) { setStatus(mode === 'join' ? 'Host target not found on this page.' : 'Select a button first', 'error'); if (mode === 'join') reportGuest('Target not found'); return; }
         saveSettings();
         clicksCompleted = 0;
         clicksPlanned = Number(ui.count.value);
+        if (mode === 'host') {
+            hostRateSample = { clicks: 0, time: Date.now(), rate: 0 };
+            renderMemberStats();
+        }
         scheduleNextClick();
     }
 
@@ -753,6 +836,17 @@
         if (validationError) { setStatus(validationError, 'error'); return; }
         if (!resolveTarget()) { setStatus('Select a button first', 'error'); return; }
         if (mode === 'host') {
+            const countdownSeconds = Number(ui.countdown.value);
+            if (!Number.isInteger(countdownSeconds) || countdownSeconds < 0 || countdownSeconds > 60) {
+                setStatus('Countdown must be a whole number from 0 to 60 seconds.', 'error');
+                return;
+            }
+            if (countdownSeconds > 0) {
+                const delayMs = countdownSeconds * 1_000;
+                sendParty(getPartyCountdownCommand(delayMs));
+                scheduleCountdown(Date.now() + delayMs);
+                return;
+            }
             sendParty(getPartyStartCommand());
         }
         startClicking();
@@ -770,7 +864,7 @@
     document.addEventListener('keydown', event => {
         if (event.key !== 'Escape') return;
         if (selecting) endSelection();
-        else if (timer !== null) {
+        else if (timer !== null || countdownTimer !== null) {
             if (mode === 'host') sendParty({ type: 'command', command: 'stop' });
             stopClicking();
         }
@@ -781,5 +875,6 @@
 
     GM_registerMenuCommand('Show Auto Clicker', () => { host.style.display = 'block'; });
     loadSettings();
+    loadPanelPosition();
     showModeScreen();
 })();

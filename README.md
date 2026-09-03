@@ -33,13 +33,13 @@ The script already uses the public relay at `https://clicker.oz1tnj.dk`; no serv
 
 ## Use the party controls
 
-You can drag the panel by its title bar. Use the `−` button to minimize it to a small title bar and `+` to restore it.
+You can drag the panel by its title bar. Its position is remembered on future pages. Use the `−` button to minimize it to a small title bar and `+` to restore it.
 
 1. On the first screen, choose **Local**, **Host**, or **Join**.
 2. In **Local** mode, select a target button and control the clicker only in this browser.
-3. In **Host** mode, select the target button, share the generated party code, then set the delay, randomization, and click count. Start and Stop are synchronized to all joined browsers.
+3. In **Host** mode, select the target button, share the generated party code, then set the delay, randomization, click count, and optional countdown. Start and Stop are synchronized to all joined browsers.
 4. In **Join** mode, enter the code from the host. Joined browsers are read-only: the host's target selector and settings are applied automatically.
-5. The host dashboard shows every joined browser's readiness, running state, and click progress.
+5. The host dashboard shows party click progress and total clicks per second, plus every joined browser's readiness, state, progress, and click rate.
 
 > Joined browsers should be on matching pages with the same button layout. The host's selected CSS selector must exist in every joined browser for synchronized clicking to work.
 

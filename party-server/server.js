@@ -87,6 +87,7 @@ function removeFromRoom(client) {
 
     room.clients.delete(client);
     if (room.host === client) {
+        clearTimeout(room.countdownTimer);
         broadcast(room, { type: 'party-ended', message: 'The host disconnected. This party has ended.' });
         for (const member of room.clients) {
             clientInfo.delete(member);
@@ -106,15 +107,22 @@ function removeFromRoom(client) {
     clientInfo.delete(client);
 }
 
-function validCommand(message) {
-    if (message.type !== 'command') return false;
-    if (message.command === 'start' || message.command === 'stop') return true;
-    if (message.command !== 'config' || !message.settings) return false;
+function validConfig(message) {
+    if (!message.settings) return false;
     const { delay, randomization, count } = message.settings;
     return Number.isFinite(delay) && delay >= 20 &&
         Number.isFinite(randomization) && randomization >= 0 &&
         Number.isInteger(count) && count >= 0 &&
         typeof message.targetSelector === 'string' && message.targetSelector.length <= 2048;
+}
+
+function validCommand(message) {
+    if (message.type !== 'command') return false;
+    if (message.command === 'stop') return true;
+    if (message.command === 'config') return validConfig(message);
+    if (message.command === 'start') return !message.settings || validConfig(message);
+    return message.command === 'countdown' && validConfig(message) &&
+        Number.isInteger(message.delayMs) && message.delayMs >= 1_000 && message.delayMs <= 60_000;
 }
 
 function validMemberStatus(message) {
@@ -144,7 +152,8 @@ function connectClient(client, message) {
             host: client,
             clients: new Set([client]),
             members: new Map(),
-            state: { revision: 0, running: false, config: null }
+            state: { revision: 0, running: false, config: null, scheduledStartAt: null },
+            countdownTimer: null
         });
         clientInfo.set(client, { roomCode: code, role: 'host' });
         send(client, { type: 'welcome', role: 'host', roomCode: code, participants: 1 });
@@ -179,16 +188,45 @@ function handleMessage(client, message) {
     if (message.command === 'config') {
         room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
     } else if (message.command === 'start') {
+        clearTimeout(room.countdownTimer);
+        room.countdownTimer = null;
+        room.state.scheduledStartAt = null;
         if (message.settings && typeof message.targetSelector === 'string') {
             room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
         }
         room.state.running = true;
     } else if (message.command === 'stop') {
+        clearTimeout(room.countdownTimer);
+        room.countdownTimer = null;
+        room.state.scheduledStartAt = null;
         room.state.running = false;
+    } else if (message.command === 'countdown') {
+        clearTimeout(room.countdownTimer);
+        room.state.config = { settings: message.settings, targetSelector: message.targetSelector };
+        room.state.running = false;
+        room.state.scheduledStartAt = Date.now() + message.delayMs;
+        room.countdownTimer = setTimeout(() => {
+            if (rooms.get(info.roomCode) !== room || !room.state.scheduledStartAt) return;
+            room.countdownTimer = null;
+            room.state.scheduledStartAt = null;
+            room.state.running = true;
+            room.state.revision++;
+            broadcast(room, {
+                type: 'command',
+                command: 'start',
+                settings: room.state.config.settings,
+                targetSelector: room.state.config.targetSelector,
+                revision: room.state.revision
+            });
+        }, message.delayMs);
     }
 
     room.state.revision++;
-    broadcast(room, { ...message, revision: room.state.revision }, client);
+    broadcast(room, {
+        ...message,
+        ...(message.command === 'countdown' ? { startAt: room.state.scheduledStartAt } : {}),
+        revision: room.state.revision
+    }, client);
 }
 
 const httpServer = http.createServer(async (request, response) => {
