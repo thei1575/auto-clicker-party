@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.9.0
+// @version      3.9.1
 // @description  Local auto-clicking or host-controlled synchronized click parties, with optional human-like timing.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -69,6 +69,10 @@
     const RESYNC_CLOCK_SYNC_SAMPLES = 5;
     const PARTY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const TARGET_ATTRIBUTE = 'data-auto-clicker-target';
+    const MARKER_ID = 'auto-clicker-target-marker';
+    // The marker follows the target instead of waiting for a scroll or a click to notice that
+    // the page moved it, and re-resolves the selector so an SPA re-render cannot strand it.
+    const MARKER_TRACK_INTERVAL_MS = 100;
     const HOVER_ATTRIBUTE = 'data-auto-clicker-hover';
     const REJECTED_ATTRIBUTE = 'data-auto-clicker-rejected';
     // Elements the DOM itself reports as interactive.
@@ -115,6 +119,9 @@
     let partyRestoreDeadline = 0;
     let hostRateSample = { clicks: 0, time: Date.now(), rate: 0 };
     let dragOffset = null;
+    let markerFrame = null;
+    let markerRectKey = '';
+    let markerCheckedAt = -Infinity;
     const memberStats = new Map();
 
     const pageStyle = document.createElement('style');
@@ -122,6 +129,11 @@
         [${TARGET_ATTRIBUTE}] { outline: 3px solid #22c55e !important; outline-offset: 2px !important; }
         [${HOVER_ATTRIBUTE}] { outline: 3px solid #f59e0b !important; outline-offset: 2px !important; }
         [${REJECTED_ATTRIBUTE}] { outline: 3px dashed #ef4444 !important; outline-offset: 2px !important; cursor: not-allowed !important; }
+        #${MARKER_ID} .chase { animation: auto-clicker-chase 1.15s linear infinite; }
+        @keyframes auto-clicker-chase { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -100; } }
+        @media (prefers-reduced-motion: reduce) {
+            #${MARKER_ID} .chase { animation: none; stroke-dasharray: none; }
+        }
     `;
     (document.head || document.documentElement).appendChild(pageStyle);
 
@@ -131,9 +143,27 @@
     document.documentElement.appendChild(host);
     const shadow = host.attachShadow({ mode: 'open' });
 
-    const joinedTargetMarker = document.createElement('div');
+    // A ring drawn as two SVG rounded rects: a faint full track so the button stays
+    // identifiable at rest, and a bright arc chasing around it. pathLength normalises both to
+    // 100 units, so one dash pattern and one animation fit a button of any size.
+    const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+    const joinedTargetMarker = document.createElementNS(SVG_NAMESPACE, 'svg');
+    joinedTargetMarker.id = MARKER_ID;
     joinedTargetMarker.setAttribute('aria-hidden', 'true');
-    joinedTargetMarker.style.cssText = 'all:initial;display:none;position:fixed;z-index:2147483646;box-sizing:border-box;border:3px solid #22c55e;border-radius:999px;box-shadow:0 0 0 3px rgba(34,197,94,.24),0 0 18px rgba(34,197,94,.8);pointer-events:none;';
+    joinedTargetMarker.style.cssText = 'all:initial;display:none;position:fixed;z-index:2147483646;overflow:visible;pointer-events:none;filter:drop-shadow(0 0 5px rgba(34,197,94,.75));';
+    const markerTrack = document.createElementNS(SVG_NAMESPACE, 'rect');
+    const markerChase = document.createElementNS(SVG_NAMESPACE, 'rect');
+    for (const ring of [markerTrack, markerChase]) {
+        ring.setAttribute('pathLength', '100');
+        ring.setAttribute('fill', 'none');
+        ring.setAttribute('stroke-width', '3');
+    }
+    markerTrack.setAttribute('stroke', 'rgba(34,197,94,.3)');
+    markerChase.setAttribute('class', 'chase');
+    markerChase.setAttribute('stroke', '#22c55e');
+    markerChase.setAttribute('stroke-linecap', 'round');
+    markerChase.setAttribute('stroke-dasharray', '22 78');
+    joinedTargetMarker.append(markerTrack, markerChase);
     document.documentElement.appendChild(joinedTargetMarker);
 
     shadow.innerHTML = `
@@ -425,6 +455,8 @@
         ui.controlSettings.hidden = isJoin;
         ui.runButtons.hidden = isJoin;
         ui.partyProgress.hidden = !isHost;
+        if (isJoin) startJoinedTargetTracking();
+        else stopJoinedTargetTracking();
         updateIdentityDisplay();
         updateControls();
     }
@@ -572,7 +604,7 @@
         clockSyncRttMs = Infinity;
         if (clockSyncTimer !== null) clearInterval(clockSyncTimer);
         clockSyncTimer = null;
-        hideJoinedTargetMarker();
+        stopJoinedTargetTracking();
         memberStats.clear();
         clientDisplayId = '';
         partyRestoreDeadline = 0;
@@ -1177,15 +1209,31 @@
     }
 
     function showJoinedTargetMarker(element) {
-        if (mode !== 'join' || !element?.isConnected) return;
+        if (mode !== 'join' || !element?.isConnected) return hideJoinedTargetMarker();
         const rect = element.getBoundingClientRect();
         if (rect.width < 1 || rect.height < 1) return hideJoinedTargetMarker();
+        // Clamping an off-screen target to zero used to park the ring in the top-left corner,
+        // drawing it around whatever happened to be there.
+        if (rect.bottom <= 0 || rect.right <= 0 || rect.top >= window.innerHeight || rect.left >= window.innerWidth) {
+            return hideJoinedTargetMarker();
+        }
         const padding = 7;
+        const inset = 2;
+        const width = rect.width + padding * 2;
+        const height = rect.height + padding * 2;
         joinedTargetMarker.style.display = 'block';
-        joinedTargetMarker.style.left = `${Math.max(0, rect.left - padding)}px`;
-        joinedTargetMarker.style.top = `${Math.max(0, rect.top - padding)}px`;
-        joinedTargetMarker.style.width = `${rect.width + padding * 2}px`;
-        joinedTargetMarker.style.height = `${rect.height + padding * 2}px`;
+        joinedTargetMarker.style.left = `${rect.left - padding}px`;
+        joinedTargetMarker.style.top = `${rect.top - padding}px`;
+        joinedTargetMarker.style.width = `${width}px`;
+        joinedTargetMarker.style.height = `${height}px`;
+        joinedTargetMarker.setAttribute('viewBox', `0 0 ${width} ${height}`);
+        for (const ring of [markerTrack, markerChase]) {
+            ring.setAttribute('x', inset);
+            ring.setAttribute('y', inset);
+            ring.setAttribute('width', Math.max(0, width - inset * 2));
+            ring.setAttribute('height', Math.max(0, height - inset * 2));
+            ring.setAttribute('rx', Math.min(width, height) / 2);
+        }
     }
 
     function hideJoinedTargetMarker() {
@@ -1195,6 +1243,41 @@
     function refreshJoinedTargetMarker() {
         if (mode === 'join' && target?.isConnected) showJoinedTargetMarker(target);
         else hideJoinedTargetMarker();
+    }
+
+    // Scroll and resize are not the only ways a button moves: fonts finish loading, images
+    // reflow, a framework re-renders the element entirely. Following it on a frame timer means
+    // the ring is correct without waiting for the guest to touch anything.
+    function trackJoinedTargetMarker(timestamp) {
+        markerFrame = requestAnimationFrame(trackJoinedTargetMarker);
+        if (mode !== 'join') return stopJoinedTargetTracking();
+        if (timestamp - markerCheckedAt < MARKER_TRACK_INTERVAL_MS) return;
+        markerCheckedAt = timestamp;
+        const element = target?.isConnected ? target : resolveTarget();
+        if (!element) {
+            markerRectKey = '';
+            hideJoinedTargetMarker();
+            return;
+        }
+        const rect = element.getBoundingClientRect();
+        const key = `${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)},${Math.round(rect.height)}`;
+        if (key === markerRectKey) return;
+        markerRectKey = key;
+        showJoinedTargetMarker(element);
+    }
+
+    function startJoinedTargetTracking() {
+        if (markerFrame !== null || mode !== 'join') return;
+        markerRectKey = '';
+        markerCheckedAt = -Infinity;
+        markerFrame = requestAnimationFrame(trackJoinedTargetMarker);
+    }
+
+    function stopJoinedTargetTracking() {
+        if (markerFrame !== null) cancelAnimationFrame(markerFrame);
+        markerFrame = null;
+        markerRectKey = '';
+        hideJoinedTargetMarker();
     }
 
     function isDisabledElement(element) {
