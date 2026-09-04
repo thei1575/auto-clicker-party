@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.8.0
-// @description  Local auto-clicking or host-controlled synchronized click parties.
+// @version      3.9.0
+// @description  Local auto-clicking or host-controlled synchronized click parties, with optional human-like timing.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
 // @supportURL    https://github.com/thei1575/auto-clicker-party/issues
@@ -25,6 +25,35 @@
     'use strict';
 
     const MIN_DELAY = 20;
+    // Bumped whenever the shared run plan changes shape, so a browser on an older script
+    // refuses a plan it cannot reproduce instead of silently clicking to a different schedule.
+    const RUN_PLAN_VERSION = 1;
+    // Human clicking is bouts of clicks broken by short pauses, over a tempo that drifts and
+    // slowly tires - not a flat distribution around one interval. These constants are tuned
+    // for somebody spamming a button: long fast bursts, brief breathers between them.
+    // Calibrated against a measured spam-clicker: 7 clicks/s nominal, topping out near 11 for
+    // a ten-second stretch. Two properties have to hold at once. The spread of the tempo walk
+    // (0.2 in log space, which is what the step and the decay give together) sets how fast a
+    // sprint gets; the decay sets how long one lasts, here about fifty clicks, so a sprint can
+    // run the better part of ten seconds before it pulls back instead of dying in three.
+    const HUMAN_TEMPO_DECAY = 0.98;
+    const HUMAN_TEMPO_STEP = 0.0398;
+    const HUMAN_BURST_MIN = 10;
+    const HUMAN_BURST_SCALE = 22;
+    const HUMAN_REST_MEDIAN_MS = 260;
+    const HUMAN_REST_SIGMA = 0.4;
+    const HUMAN_LONG_REST_CHANCE = 0.04;
+    const HUMAN_LONG_REST_MEDIAN_MS = 1_200;
+    const HUMAN_LONG_REST_SIGMA = 0.5;
+    const HUMAN_FATIGUE_MAX = 0.05;
+    const HUMAN_FATIGUE_CLICKS = 6_000;
+    const HUMAN_MIN_SIGMA = 0.05;
+    // Human mode owns its own timing: these are the calibrated figures, not editable settings.
+    const HUMAN_BASE_DELAY_MS = 136;
+    const HUMAN_RANDOMIZATION_MS = 20;
+    // Stationary variance of the tempo walk, and the pace of a sprint against the nominal one.
+    const HUMAN_TEMPO_VARIANCE = HUMAN_TEMPO_STEP ** 2 / (1 - HUMAN_TEMPO_DECAY ** 2);
+    const HUMAN_PEAK_SIGMAS = 1.645;
     const SETTINGS_KEY = 'universalAutoClickerPartySettings';
     const PANEL_POSITION_KEY = 'universalAutoClickerPartyPanelPosition';
     const BROWSER_ID_KEY = 'universalAutoClickerPartyBrowserId';
@@ -63,6 +92,7 @@
     let countdownStartAt = null;
     let runPlan = null;
     let syncedRandomState = 0;
+    let humanState = null;
     let nextClickAt = null;
     let clicksCompleted = 0;
     let clicksPlanned = 0;
@@ -159,12 +189,16 @@
             .id-value { color:#e2e8f0; font-weight:700; font-variant-numeric:tabular-nums; }
             .target { min-height:32px; margin-bottom:8px; padding:7px 9px; overflow:hidden; color:#94a3b8; background:#0f172a; border:1px solid #334155; border-radius:8px; text-overflow:ellipsis; white-space:nowrap; }
             .target.selected { color:#a7f3d0; border-color:#059669; }
-            .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:8px 0 0; }
+            .grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; margin:8px 0 0; }
             .full { grid-column:1/-1; }
             label { display:block; color:#cbd5e1; font-size:12px; }
-            input { width:100%; margin-top:4px; padding:7px 8px; color:#f8fafc; background:#020617; border:1px solid #475569; border-radius:7px; outline:none; font:inherit; }
-            input:focus { border-color:#60a5fa; }
+            input,select { width:100%; margin-top:4px; padding:7px 8px; color:#f8fafc; background:#020617; border:1px solid #475569; border-radius:7px; outline:none; font:inherit; }
+            input:focus,select:focus { border-color:#60a5fa; }
+            select { appearance:none; background-image:linear-gradient(45deg,transparent 50%,#94a3b8 50%),linear-gradient(135deg,#94a3b8 50%,transparent 50%); background-position:calc(100% - 14px) 55%,calc(100% - 9px) 55%; background-size:5px 5px; background-repeat:no-repeat; cursor:pointer; }
+            select:disabled { cursor:not-allowed; opacity:.55; }
+            option { color:#f8fafc; background:#020617; }
             .hint { margin-top:3px; color:#64748b; font-size:10px; }
+            [hidden] { display:none !important; }
             .buttons { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
             #select { grid-column:1/-1; background:#475569; }
             #select.selecting { background:#d97706; }
@@ -237,8 +271,10 @@
                     <div class="buttons host-only" id="selection-controls"><button class="action" id="select">Select button</button></div>
                     <div id="control-settings">
                         <div class="grid">
-                            <label>Base delay (ms)<input id="delay" type="number" min="${MIN_DELAY}" step="10" value="1000"></label>
-                            <label>Randomize &plusmn; (ms)<input id="randomization" type="number" min="0" step="10" value="0"></label>
+                            <label class="full">Timing<select id="timing-mode"><option value="human">Human-like</option><option value="manual">Manual</option></select></label>
+                            <div class="hint full" id="rate-hint"></div>
+                            <label id="delay-field">Base delay (ms)<input id="delay" type="number" min="${MIN_DELAY}" step="10" value="1000"></label>
+                            <label id="randomization-field">Randomize &plusmn; (ms)<input id="randomization" type="number" min="0" step="10" value="0"></label>
                             <label class="full">Number of clicks<input id="count" type="number" min="0" step="1" value="10"><div class="hint">0 = unlimited clicks</div></label>
                         </div>
                     </div>
@@ -259,7 +295,8 @@
         'member-card', 'member-summary', 'party-progress', 'member-list',
         'join-card', 'client-id', 'join-room-code', 'join-connection',
         'target', 'selection-controls', 'select', 'control-settings', 'delay',
-        'randomization', 'count', 'run-buttons', 'start', 'stop', 'status'
+        'randomization', 'count', 'timing-mode', 'delay-field', 'randomization-field', 'rate-hint',
+        'run-buttons', 'start', 'stop', 'status'
     ].map(id => [id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), shadow.getElementById(id)]));
 
     function setStatus(message, type = '') {
@@ -310,19 +347,46 @@
         ui.minimize.setAttribute('aria-label', minimized ? 'Restore' : 'Minimize');
     }
 
+    function humanTimingSelected() {
+        return ui.timingMode.value === 'human';
+    }
+
+    // Human mode ignores the delay boxes and reports its calibrated pace instead, so the two
+    // stay untouched in storage and come back as they were when manual timing is picked again.
     function getSettings() {
-        return { delay: Number(ui.delay.value), randomization: Number(ui.randomization.value), count: Number(ui.count.value) };
+        const humanize = humanTimingSelected();
+        return {
+            delay: humanize ? HUMAN_BASE_DELAY_MS : Number(ui.delay.value),
+            randomization: humanize ? HUMAN_RANDOMIZATION_MS : Number(ui.randomization.value),
+            count: Number(ui.count.value),
+            humanize
+        };
     }
 
     function saveSettings() {
-        GM_setValue(SETTINGS_KEY, getSettings());
+        GM_setValue(SETTINGS_KEY, {
+            delay: Number(ui.delay.value),
+            randomization: Number(ui.randomization.value),
+            count: Number(ui.count.value),
+            humanize: humanTimingSelected()
+        });
     }
 
     function loadSettings() {
-        const settings = GM_getValue(SETTINGS_KEY, {});
-        ui.delay.value = Number.isFinite(settings.delay) ? settings.delay : 1000;
-        ui.randomization.value = Number.isFinite(settings.randomization) ? settings.randomization : 0;
-        ui.count.value = Number.isFinite(settings.count) ? settings.count : 10;
+        const settings = GM_getValue(SETTINGS_KEY, null);
+        ui.delay.value = Number.isFinite(settings?.delay) ? settings.delay : 1000;
+        ui.randomization.value = Number.isFinite(settings?.randomization) ? settings.randomization : 0;
+        ui.count.value = Number.isFinite(settings?.count) ? settings.count : 10;
+        // A first install starts on the calibrated timing; an existing one keeps its own choice.
+        ui.timingMode.value = (settings ? settings.humanize === true : true) ? 'human' : 'manual';
+        updateTimingFields();
+    }
+
+    function updateTimingFields() {
+        const humanize = humanTimingSelected();
+        ui.delayField.hidden = humanize;
+        ui.randomizationField.hidden = humanize;
+        updateRateHint();
     }
 
     function savePanelPosition() {
@@ -374,6 +438,7 @@
         ui.delay.disabled = running || joined;
         ui.randomization.disabled = running || joined;
         ui.count.disabled = running || joined;
+        ui.timingMode.disabled = running || joined;
         ui.start.disabled = running || joined || hostConnecting || hostSessionRunning;
         ui.stop.disabled = (!running && !hostSessionRunning) || joined;
     }
@@ -564,6 +629,7 @@
     }
 
     function scheduleCountdown(serverStartAt, plan) {
+        if (planTooNew(plan)) return;
         cancelCountdown();
         const delay = Math.max(0, serverStartAt - serverClockOffsetMs - Date.now());
         countdownStartAt = serverStartAt;
@@ -581,7 +647,7 @@
         const session = httpParty;
         const seed = new Uint32Array(1);
         crypto.getRandomValues(seed);
-        const run = { seed: seed[0] };
+        const run = { seed: seed[0], planVersion: RUN_PLAN_VERSION };
         setStatus('Scheduling synchronized start…', 'running');
         updateControls();
         try {
@@ -1030,9 +1096,15 @@
     function applyPartyConfig(config) {
         const settings = config.settings;
         if (!settings || !Number.isFinite(settings.delay) || !Number.isFinite(settings.randomization) || !Number.isInteger(settings.count)) return;
-        ui.delay.value = settings.delay;
-        ui.randomization.value = settings.randomization;
+        if (settings.humanize !== undefined && typeof settings.humanize !== 'boolean') return;
+        ui.timingMode.value = settings.humanize === true ? 'human' : 'manual';
+        // Human timing is the host's calibrated pace, so it never overwrites the local boxes.
+        if (!settings.humanize) {
+            ui.delay.value = settings.delay;
+            ui.randomization.value = settings.randomization;
+        }
         ui.count.value = settings.count;
+        updateTimingFields();
         if (target) target.removeAttribute(TARGET_ATTRIBUTE);
         hideJoinedTargetMarker();
         targetSelector = config.targetSelector || '';
@@ -1242,16 +1314,145 @@
         } catch (_) { return null; }
     }
 
-    function getRandomDelay() {
-        const minimum = Math.max(MIN_DELAY, Number(ui.delay.value) - Number(ui.randomization.value));
-        const maximum = Math.max(minimum, Number(ui.delay.value) + Number(ui.randomization.value));
-        if (!runPlan) return Math.round(minimum + Math.random() * (maximum - minimum));
-        // xorshift32 gives every browser the same delay sequence from the shared run seed.
+    // A run plan this script cannot reproduce is refused outright rather than clicked to a
+    // schedule of its own.
+    function planTooNew(plan) {
+        if (!plan || !Number.isFinite(plan.planVersion) || plan.planVersion <= RUN_PLAN_VERSION) return false;
+        cancelCountdown();
+        updateControls();
+        setStatus('The host runs a newer version of this script. Update the userscript.', 'error');
+        reportGuest('Update required');
+        return true;
+    }
+
+    // FNV-1a over the browser ID, mixed into the shared seed.
+    function mixSeed(seed, text) {
+        let hash = 0x811c9dc5;
+        for (let index = 0; index < text.length; index++) {
+            hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193) >>> 0;
+        }
+        // xorshift32 is stuck on zero, so never hand it a zero state.
+        return ((seed ^ hash) >>> 0) || 0x6d2b79f5;
+    }
+
+    function localSeed() {
+        const values = new Uint32Array(1);
+        crypto.getRandomValues(values);
+        return values[0] || 0x6d2b79f5;
+    }
+
+    function nextBurstLength() {
+        return HUMAN_BURST_MIN + Math.floor(-Math.log(Math.max(1e-9, nextRandomFraction())) * HUMAN_BURST_SCALE);
+    }
+
+    function resetHumanState() {
+        // Open with a full burst: a run should start by clicking, not by resting.
+        humanState = { logTempo: 0, burstLeft: 0, clicks: 0 };
+        humanState.burstLeft = nextBurstLength();
+    }
+
+    function nextRandomFraction() {
         syncedRandomState ^= syncedRandomState << 13;
         syncedRandomState ^= syncedRandomState >>> 17;
         syncedRandomState ^= syncedRandomState << 5;
-        const fraction = (syncedRandomState >>> 0) / 0x100000000;
-        return Math.round(minimum + fraction * (maximum - minimum));
+        return (syncedRandomState >>> 0) / 0x100000000;
+    }
+
+    // Box-Muller, drawn from the same seeded stream so a run stays reproducible.
+    function nextRandomNormal() {
+        const uniform = Math.max(1e-9, nextRandomFraction());
+        return Math.sqrt(-2 * Math.log(uniform)) * Math.cos(2 * Math.PI * nextRandomFraction());
+    }
+
+    function expectedRestMs() {
+        return (1 - HUMAN_LONG_REST_CHANCE) * HUMAN_REST_MEDIAN_MS * Math.exp(HUMAN_REST_SIGMA ** 2 / 2) +
+            HUMAN_LONG_REST_CHANCE * HUMAN_LONG_REST_MEDIAN_MS * Math.exp(HUMAN_LONG_REST_SIGMA ** 2 / 2);
+    }
+
+    // Pauses and the right-skewed tail both cost time. Compressing the in-burst pace to pay for
+    // them keeps the base delay meaning one thing in both modes: the sustained rate. A person
+    // clicking 7 a second in bursts is going faster than that while the burst lasts.
+    function humanPaceDelay(base, sigma) {
+        const burst = HUMAN_BURST_MIN + HUMAN_BURST_SCALE;
+        const inflation = Math.exp((sigma ** 2 + HUMAN_TEMPO_VARIANCE) / 2);
+        return Math.max(MIN_DELAY, (burst * base - expectedRestMs()) / ((burst - 1) * inflation + 1));
+    }
+
+    function humanSigma(base, spread) {
+        return Math.max(HUMAN_MIN_SIGMA, (Number.isFinite(spread) ? spread : 0) / base);
+    }
+
+    function getUniformDelay(base, spread) {
+        const minimum = Math.max(MIN_DELAY, base - spread);
+        const maximum = Math.max(minimum, base + spread);
+        return Math.round(minimum + nextRandomFraction() * (maximum - minimum));
+    }
+
+    // Three things separate a person from a flat interval: the gaps are right-skewed rather
+    // than symmetric, the tempo wanders over seconds instead of resetting every click, and
+    // clicking comes in bouts that stop to refocus.
+    function getHumanDelay(base, spread) {
+        if (!humanState) resetHumanState();
+        const state = humanState;
+        const sigma = humanSigma(base, spread);
+        const paced = humanPaceDelay(base, sigma);
+        state.logTempo = state.logTempo * HUMAN_TEMPO_DECAY + nextRandomNormal() * HUMAN_TEMPO_STEP;
+        const fatigue = 1 + Math.min(HUMAN_FATIGUE_MAX, state.clicks / HUMAN_FATIGUE_CLICKS);
+        state.clicks++;
+        if (state.burstLeft <= 0) {
+            state.burstLeft = nextBurstLength();
+            const longRest = nextRandomFraction() < HUMAN_LONG_REST_CHANCE;
+            const rest = (longRest ? HUMAN_LONG_REST_MEDIAN_MS : HUMAN_REST_MEDIAN_MS) *
+                Math.exp(nextRandomNormal() * (longRest ? HUMAN_LONG_REST_SIGMA : HUMAN_REST_SIGMA));
+            return Math.round(Math.max(MIN_DELAY, paced * fatigue + rest));
+        }
+        state.burstLeft--;
+        return Math.round(Math.max(MIN_DELAY, paced * Math.exp(nextRandomNormal() * sigma + state.logTempo) * fatigue));
+    }
+
+    function getRandomDelay() {
+        const { delay, randomization, humanize } = getSettings();
+        return humanize ? getHumanDelay(delay, randomization) : getUniformDelay(delay, randomization);
+    }
+
+    // Fatigue ramps to its cap over the first few hundred clicks, so a short run barely feels
+    // it while a long one settles at the cap.
+    function averageFatigue(clicks) {
+        const rampClicks = HUMAN_FATIGUE_MAX * HUMAN_FATIGUE_CLICKS;
+        if (clicks > 0 && clicks <= rampClicks) return 1 + clicks / (2 * HUMAN_FATIGUE_CLICKS);
+        return 1 + HUMAN_FATIGUE_MAX - (clicks > 0 ? rampClicks * HUMAN_FATIGUE_MAX / (2 * clicks) : 0);
+    }
+
+    // Returns the sustained rate, and the rate a burst reaches while the tempo runs fast.
+    function estimateClicksPerSecond() {
+        const { delay, randomization, count, humanize } = getSettings();
+        if (!Number.isFinite(delay) || delay < MIN_DELAY) return null;
+        if (!humanize) return { sustained: 1_000 / delay, peak: null };
+        const sigma = humanSigma(delay, randomization);
+        const burst = HUMAN_BURST_MIN + HUMAN_BURST_SCALE;
+        const finite = Number.isInteger(count) && count > 0;
+        const paced = humanPaceDelay(delay, sigma) * averageFatigue(finite ? count : 0);
+        const inBurst = paced * Math.exp((sigma ** 2 + HUMAN_TEMPO_VARIANCE) / 2);
+        // A short run may finish inside its first burst and never pause at all.
+        const clicks = finite ? count : burst;
+        const rests = finite ? Math.max(0, count - HUMAN_BURST_MIN) / burst : 1;
+        const cycle = clicks * inBurst + rests * (paced + expectedRestMs() - inBurst);
+        return {
+            sustained: clicks * 1_000 / cycle,
+            peak: 1_000 / (paced * Math.exp(sigma ** 2 / 2 - HUMAN_PEAK_SIGMAS * Math.sqrt(HUMAN_TEMPO_VARIANCE)))
+        };
+    }
+
+    function updateRateHint() {
+        const rate = estimateClicksPerSecond();
+        const show = value => value < 10 ? value.toFixed(1) : String(Math.round(value));
+        if (!rate) {
+            ui.rateHint.textContent = humanTimingSelected() ? 'Bursts and pauses' : 'Even rhythm';
+            return;
+        }
+        ui.rateHint.textContent = humanTimingSelected()
+            ? `Bursts and pauses \u00b7 \u2248${show(rate.sustained)}/s, sprints to \u2248${show(rate.peak)}/s`
+            : `Even rhythm \u00b7 \u2248${show(rate.sustained)} clicks/s`;
     }
 
     function stopClicking(message = 'Stopped') {
@@ -1314,6 +1515,7 @@
     function startClicking(fromHost = false, synchronizedPlan = null) {
         if (timer !== null) return;
         if (mode === 'join' && !fromHost) return;
+        if (planTooNew(synchronizedPlan)) return;
         cancelCountdown();
         const validationError = validateSettings();
         if (validationError) { setStatus(validationError, 'error'); if (mode === 'join') reportGuest('Invalid host settings'); return; }
@@ -1322,7 +1524,11 @@
         clicksCompleted = 0;
         clicksPlanned = Number(ui.count.value);
         runPlan = synchronizedPlan && Number.isInteger(synchronizedPlan.seed) && Number.isFinite(synchronizedPlan.startAt) ? synchronizedPlan : null;
-        syncedRandomState = runPlan ? (runPlan.seed || 0x6D2B79F5) : 0;
+        // Each browser mixes its own ID into the shared seed: the party still starts on one
+        // absolute millisecond, then every browser follows its own rhythm instead of pausing
+        // and resuming in lockstep, which would itself look coordinated.
+        syncedRandomState = runPlan ? mixSeed(runPlan.seed, getBrowserId()) : localSeed();
+        resetHumanState();
         nextClickAt = runPlan ? runPlan.startAt : null;
         if (mode === 'host') {
             hostRateSample = { clicks: 0, time: Date.now(), rate: 0 };
@@ -1378,10 +1584,12 @@
         }
         stopClicking();
     });
-    [ui.delay, ui.randomization, ui.count].forEach(element => element.addEventListener('change', () => {
+    [ui.delay, ui.randomization, ui.count, ui.timingMode].forEach(element => element.addEventListener('change', () => {
+        updateTimingFields();
         saveSettings();
         syncHostConfig();
     }));
+    [ui.delay, ui.randomization].forEach(element => element.addEventListener('input', updateRateHint));
     ui.hide.addEventListener('click', () => { if (selecting) endSelection(); host.style.display = 'none'; });
 
     document.addEventListener('keydown', event => {

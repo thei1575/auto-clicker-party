@@ -217,15 +217,17 @@ function queueMemberStatus(room, memberId, message) {
 
 function validConfig(message) {
     if (!message.settings) return false;
-    const { delay, randomization, count } = message.settings;
+    const { delay, randomization, count, humanize } = message.settings;
     return Number.isFinite(delay) && delay >= 20 &&
         Number.isFinite(randomization) && randomization >= 0 &&
         Number.isInteger(count) && count >= 0 &&
+        (humanize === undefined || typeof humanize === 'boolean') &&
         typeof message.targetSelector === 'string' && message.targetSelector.length <= 2048;
 }
 
 function validRun(run) {
-    return run && Number.isInteger(run.seed) && run.seed >= 0 && run.seed <= 0xFFFFFFFF;
+    return run && Number.isInteger(run.seed) && run.seed >= 0 && run.seed <= 0xFFFFFFFF &&
+        (run.planVersion === undefined || (Number.isInteger(run.planVersion) && run.planVersion >= 1 && run.planVersion <= 1_000));
 }
 
 function validCommand(message) {
