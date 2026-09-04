@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.6.2
+// @version      3.6.3
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -31,6 +31,7 @@
     const PARTY_SESSION_KEY = 'universalAutoClickerPartySession';
     const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
     const SYNC_COUNTDOWN_MS = 5_000;
+    const IDLE_POLL_INTERVAL_MS = 350;
     const INITIAL_CLOCK_SYNC_SAMPLES = 7;
     const RESYNC_CLOCK_SYNC_SAMPLES = 5;
     const PARTY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -629,8 +630,10 @@
                 const response = await partyRequest('GET', `/api/party/events?token=${encodeURIComponent(session.token)}`);
                 if (!response.responseText) continue;
                 const result = JSON.parse(response.responseText);
-                for (const message of result.messages || []) handlePartyMessage(session, JSON.stringify(message));
+                const messages = result.messages || [];
+                for (const message of messages) handlePartyMessage(session, JSON.stringify(message));
                 applyPartyState(result.state);
+                if (messages.length === 0) await new Promise(resolve => setTimeout(resolve, IDLE_POLL_INTERVAL_MS));
             } catch (error) {
                 if (httpParty === session && !session.closed) {
                     if (error.status === 401) {

@@ -9,9 +9,8 @@ const httpClients = new Map();
 const roomCodePattern = /^[A-Z2-9]{6,16}$/;
 const browserIdPattern = /^B-[A-Z2-9]{6}$/;
 const MAX_MESSAGE_SIZE = 8 * 1024;
-// Tampermonkey's request bridge is more reliable with frequent poll completion.
-// Commands are still delivered immediately when a poll is held open.
-const LONG_POLL_MS = 2_000;
+// The public proxy can terminate held upstream responses. HTTP clients therefore
+// use short, paced polling instead of long-polling; WebSocket clients remain push-based.
 const HTTP_CLIENT_TTL_MS = 70_000;
 const MEMBER_STATUS_FLUSH_MS = 1_000;
 const RECONNECT_GRACE_MS = 5 * 60_000;
@@ -455,25 +454,7 @@ const httpServer = http.createServer(async (request, response) => {
             return writeJson(response, 204);
         }
         if (url.pathname === '/api/party/events' && request.method === 'GET') {
-            if (client.queue.length) return writeJson(response, 200, { messages: client.queue.splice(0), state: partyState(client) });
-            closeHttpWait(client);
-            client.waiting = response;
-            client.waitTimer = setTimeout(() => {
-                if (client.waiting === response) {
-                    client.waiting = null;
-                    client.waitTimer = null;
-                    writeJson(response, 200, { messages: [], state: partyState(client) });
-                }
-            }, LONG_POLL_MS);
-            response.on('close', () => {
-                if (client.waiting !== response) return;
-                client.waiting = null;
-                clearTimeout(client.waitTimer);
-                client.waitTimer = null;
-                // Proxies can close an upstream response after delivering it. Keep the
-                // logical client until it expires or reconnects with the same browser ID.
-            });
-            return;
+            return writeJson(response, 200, { messages: client.queue.splice(0), state: partyState(client) });
         }
         return writeJson(response, 404, { error: 'Not found.' });
     } catch (error) {
@@ -481,8 +462,7 @@ const httpServer = http.createServer(async (request, response) => {
     }
 });
 
-// Keep connections warm across successive long-poll requests. This avoids a TCP/TLS
-// reconnect storm when a large party is idle, while the proxy remains the public edge.
+// Keep connections warm across paced HTTP polling while the proxy remains the public edge.
 httpServer.keepAliveTimeout = 60_000;
 httpServer.headersTimeout = 65_000;
 httpServer.requestTimeout = 60_000;
