@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.4.0
+// @version      3.4.1
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -128,8 +128,15 @@
             .status.running { color:#86efac; }
             .status.error { color:#fca5a5; }
             .party-status { color:#94a3b8; font-size:11px; }
-            .member-list { display:grid; gap:5px; }
-            .member { display:flex; justify-content:space-between; padding:6px 7px; color:#cbd5e1; background:#0f172a; border-radius:6px; font-size:11px; }
+            .member-list { display:grid; gap:7px; }
+            .member { display:grid; gap:7px; padding:8px; color:#cbd5e1; background:#0f172a; border:1px solid #243247; border-radius:7px; font-size:11px; }
+            .member-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+            .member-name { color:#e2e8f0; font-weight:700; }
+            .member-state { max-width:145px; overflow:hidden; color:#a7f3d0; font-size:10px; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
+            .member-metrics { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:5px; }
+            .member-metric { min-width:0; padding:5px 6px; background:#111c31; border-radius:5px; }
+            .member-metric-label { display:block; color:#64748b; font-size:9px; letter-spacing:.04em; text-transform:uppercase; }
+            .member-metric-value { display:block; margin-top:1px; overflow:hidden; color:#bfdbfe; font-size:10px; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
             .party-progress { color:#86efac; font-size:10px; font-weight:500; }
             .readonly { color:#94a3b8; }
             .footer { margin-top:11px; padding-top:9px; color:#64748b; border-top:1px solid #243247; font-size:10px; text-align:center; }
@@ -594,13 +601,38 @@
         for (const [id, stats] of memberStats) {
             const row = document.createElement('div');
             row.className = 'member';
+            const header = document.createElement('div');
+            header.className = 'member-head';
             const name = document.createElement('span');
-            const progress = document.createElement('span');
-            const diff = Number.isFinite(stats.timeDiffMs) ? ` · clock ${stats.timeDiffMs >= 0 ? '+' : ''}${Math.round(stats.timeDiffMs)} ms` : '';
-            name.textContent = `Browser ${id}: ${stats.state}${diff}`;
+            name.className = 'member-name';
+            name.textContent = `Browser ${id}`;
+            const state = document.createElement('span');
+            state.className = 'member-state';
+            state.textContent = stats.state;
             const total = stats.total === null ? '∞' : stats.total;
-            progress.textContent = `${stats.clicks} / ${total} · ${(stats.rate || 0).toFixed(1)}/s`;
-            row.append(name, progress);
+            const clock = Number.isFinite(stats.timeDiffMs)
+                ? `${stats.timeDiffMs >= 0 ? '+' : ''}${Math.round(stats.timeDiffMs)} ms`
+                : '—';
+            const metrics = document.createElement('div');
+            metrics.className = 'member-metrics';
+            for (const [label, value] of [
+                ['Progress', `${stats.clicks} / ${total}`],
+                ['Rate', `${(stats.rate || 0).toFixed(1)}/s`],
+                ['Clock', clock],
+            ]) {
+                const metric = document.createElement('div');
+                metric.className = 'member-metric';
+                const metricLabel = document.createElement('span');
+                metricLabel.className = 'member-metric-label';
+                metricLabel.textContent = label;
+                const metricValue = document.createElement('span');
+                metricValue.className = 'member-metric-value';
+                metricValue.textContent = value;
+                metric.append(metricLabel, metricValue);
+                metrics.appendChild(metric);
+            }
+            header.append(name, state);
+            row.append(header, metrics);
             ui.memberList.appendChild(row);
         }
     }
