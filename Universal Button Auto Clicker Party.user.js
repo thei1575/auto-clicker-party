@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.6.0
+// @version      3.6.1
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -105,6 +105,7 @@
             .minimize { font-size:18px; line-height:1; }
             .close:hover,.minimize:hover,.back:hover { background:#334155; }
             .screen[hidden],.host-only[hidden],.join-only[hidden] { display:none; }
+            .panel.joined-mode #selection-controls,.panel.joined-mode #control-settings { display:none !important; }
             .intro { margin:2px 0 12px; color:#94a3b8; }
             .mode-buttons { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
             .action { padding:10px; color:#fff; background:#2563eb; border:0; border-radius:8px; cursor:pointer; font-weight:700; }
@@ -183,7 +184,7 @@
                     <div class="readonly">The host selects the target and controls all settings. This browser will follow automatically.</div>
                 </section>
                 <div class="target" id="target">No button selected</div>
-                <div class="buttons" id="selection-controls"><button class="action" id="select">Select button</button></div>
+                <div class="buttons host-only" id="selection-controls"><button class="action" id="select">Select button</button></div>
                 <div id="control-settings">
                     <div class="grid">
                         <label>Base delay (ms)<input id="delay" type="number" min="${MIN_DELAY}" step="10" value="1000"></label>
@@ -282,6 +283,7 @@
     }
 
     function showModeScreen() {
+        ui.panel.classList.remove('joined-mode');
         ui.modeScreen.hidden = false;
         ui.controlScreen.hidden = true;
         ui.joinForm.hidden = true;
@@ -291,6 +293,7 @@
     function showControlScreen() {
         const isHost = mode === 'host';
         const isJoin = mode === 'join';
+        ui.panel.classList.toggle('joined-mode', isJoin);
         ui.modeScreen.hidden = true;
         ui.controlScreen.hidden = false;
         ui.modeLabel.textContent = mode ? mode[0].toUpperCase() + mode.slice(1) : '';
