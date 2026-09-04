@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.5.1
+// @version      3.6.0
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -28,6 +28,7 @@
     const SETTINGS_KEY = 'universalAutoClickerPartySettings';
     const PANEL_POSITION_KEY = 'universalAutoClickerPartyPanelPosition';
     const BROWSER_ID_KEY = 'universalAutoClickerPartyBrowserId';
+    const PARTY_SESSION_KEY = 'universalAutoClickerPartySession';
     const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
     const SYNC_COUNTDOWN_MS = 5_000;
     const INITIAL_CLOCK_SYNC_SAMPLES = 7;
@@ -53,6 +54,7 @@
     let httpParty = null;
     let partyRole = null;
     let partyCode = '';
+    let partySessionRunning = false;
     let connectionTimer = null;
     let reconnectTimer = null;
     let reconnectAttempt = 0;
@@ -132,8 +134,8 @@
             .status.running { color:#86efac; }
             .status.error { color:#fca5a5; }
             .party-status { color:#94a3b8; font-size:11px; }
-            .member-list { display:grid; gap:7px; }
-            .member { display:grid; gap:7px; padding:8px; color:#cbd5e1; background:#0f172a; border:1px solid #243247; border-radius:7px; font-size:11px; }
+            .member-list { display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:6px; max-height:224px; margin-top:7px; padding-right:2px; overflow-y:auto; overscroll-behavior:contain; }
+            .member { display:grid; gap:5px; padding:7px; color:#cbd5e1; background:#0f172a; border:1px solid #243247; border-radius:7px; font-size:11px; }
             .member-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
             .member-name { color:#e2e8f0; font-weight:700; }
             .member-state { max-width:145px; overflow:hidden; color:#a7f3d0; font-size:10px; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
@@ -141,6 +143,7 @@
             .member-metric { min-width:0; padding:5px 6px; background:#111c31; border-radius:5px; }
             .member-metric-label { display:block; color:#64748b; font-size:9px; letter-spacing:.04em; text-transform:uppercase; }
             .member-metric-value { display:block; margin-top:1px; overflow:hidden; color:#bfdbfe; font-size:10px; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
+            .client-id { padding:3px 6px; color:#bbf7d0; background:#14532d; border:1px solid #22c55e; border-radius:999px; font-size:10px; font-variant-numeric:tabular-nums; }
             .party-progress { color:#86efac; font-size:10px; font-weight:500; }
             .readonly { color:#94a3b8; }
             .footer { margin-top:11px; padding-top:9px; color:#64748b; border-top:1px solid #243247; font-size:10px; text-align:center; }
@@ -176,7 +179,7 @@
                     <div class="member-list" id="member-list"><div class="readonly">No browsers joined yet.</div></div>
                 </section>
                 <section class="card join-only" id="join-card" hidden>
-                    <div class="card-title">Joined party</div>
+                    <div class="card-title"><span>Joined party</span><span class="client-id" id="client-id">Connecting…</span></div>
                     <div class="readonly">The host selects the target and controls all settings. This browser will follow automatically.</div>
                 </section>
                 <div class="target" id="target">No button selected</div>
@@ -198,7 +201,7 @@
         'panel', 'hide', 'minimize', 'drag-handle', 'mode-screen', 'control-screen', 'choose-local', 'choose-host', 'choose-join',
         'join-form', 'join-code', 'connect-join', 'mode-status', 'back', 'mode-label',
         'host-card', 'party-code', 'copy-code', 'party-status', 'member-card', 'member-count', 'party-progress', 'member-list',
-        'join-card', 'target', 'selection-controls', 'select', 'control-settings', 'delay',
+        'join-card', 'client-id', 'target', 'selection-controls', 'select', 'control-settings', 'delay',
         'randomization', 'count', 'start', 'stop', 'status'
     ].map(id => [id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), shadow.getElementById(id)]));
 
@@ -302,13 +305,14 @@
     function updateControls() {
         const joined = mode === 'join';
         const running = timer !== null || countdownTimer !== null;
+        const hostSessionRunning = mode === 'host' && partySessionRunning;
         const hostConnecting = mode === 'host' && (!partyConnected() || !clockSynced);
         ui.select.disabled = running || joined;
         ui.delay.disabled = running || joined;
         ui.randomization.disabled = running || joined;
         ui.count.disabled = running || joined;
-        ui.start.disabled = running || joined || hostConnecting;
-        ui.stop.disabled = !running || joined;
+        ui.start.disabled = running || joined || hostConnecting || hostSessionRunning;
+        ui.stop.disabled = (!running && !hostSessionRunning) || joined;
     }
 
     function generatePartyCode() {
@@ -325,6 +329,20 @@
         const browserId = `B-${Array.from(values, value => PARTY_CODE_ALPHABET[value % PARTY_CODE_ALPHABET.length]).join('')}`;
         GM_setValue(BROWSER_ID_KEY, browserId);
         return browserId;
+    }
+
+    function getSavedPartySession() {
+        const session = GM_getValue(PARTY_SESSION_KEY, null);
+        if (!session || (session.role !== 'host' && session.role !== 'join') || !/^[A-Z2-9]{6,16}$/.test(session.roomCode || '')) return null;
+        return session.origin === location.origin ? session : null;
+    }
+
+    function savePartySession(role, roomCode) {
+        GM_setValue(PARTY_SESSION_KEY, { role, roomCode, origin: location.origin });
+    }
+
+    function clearSavedPartySession() {
+        GM_setValue(PARTY_SESSION_KEY, null);
     }
 
     function copyPartyCode() {
@@ -349,7 +367,7 @@
         }
     }
 
-    function disconnectParty() {
+    function disconnectParty(clearSavedSession = true) {
         clearConnectionTimer();
         if (reconnectTimer !== null) clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -363,6 +381,7 @@
         }
         partyRole = null;
         partyCode = '';
+        partySessionRunning = false;
         lastGuestReport = { state: '', time: 0 };
         lastPartyRevision = 0;
         serverClockOffsetMs = 0;
@@ -372,6 +391,7 @@
         clockSyncTimer = null;
         hideJoinedTargetMarker();
         memberStats.clear();
+        if (clearSavedSession) clearSavedPartySession();
     }
 
     function leaveToModePicker() {
@@ -447,8 +467,10 @@
             const response = await partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, getPartyCountdownCommand(SYNC_COUNTDOWN_MS, run));
             const result = JSON.parse(response.responseText || '{}');
             if (httpParty !== session || !Number.isFinite(result.startAt) || !result.run) throw new Error('Invalid countdown response');
+            partySessionRunning = true;
             scheduleCountdown(result.startAt, result.run);
         } catch (_) {
+            partySessionRunning = false;
             setStatus('Could not schedule the synchronized start.', 'error');
             updateControls();
         }
@@ -461,6 +483,7 @@
     function connectToParty(role, roomCode) {
         partyCode = roomCode;
         mode = role;
+        savePartySession(role, roomCode);
         showControlScreen();
         if (role === 'host') {
             ui.partyCode.textContent = roomCode;
@@ -704,6 +727,7 @@
                 ui.partyStatus.textContent = 'Waiting for browsers to join.';
                 renderMemberStats();
             } else {
+                ui.clientId.textContent = message.browserId || getBrowserId();
                 setStatus('Joined. Waiting for the host…');
                 reportGuest('Waiting for host');
             }
@@ -713,7 +737,12 @@
         if (message.type === 'member-joined' && partyRole === 'host') {
             memberStats.set(message.memberId, {
                 browserId: message.browserId || `Session ${message.memberId}`,
-                state: 'Joining…', clicks: 0, total: null, rate: 0, updatedAt: Date.now()
+                state: message.status?.state || 'Joining…',
+                clicks: message.status?.clicks || 0,
+                total: message.status?.total ?? null,
+                rate: 0,
+                updatedAt: Date.now(),
+                timeDiffMs: Number.isFinite(message.status?.clockOffsetMs) ? message.status.clockOffsetMs - serverClockOffsetMs : null
             });
             renderMemberStats();
             if (timer !== null) sendParty(getPartyStartCommand());
@@ -723,6 +752,24 @@
         if (message.type === 'member-left' && partyRole === 'host') {
             memberStats.delete(message.memberId);
             renderMemberStats();
+            return;
+        }
+        if ((message.type === 'member-reconnecting' || message.type === 'member-reconnected') && partyRole === 'host') {
+            const previous = memberStats.get(message.memberId);
+            if (previous) {
+                previous.state = message.type === 'member-reconnecting' ? 'Reconnecting…' : (message.status?.state || 'Ready');
+                previous.updatedAt = Date.now();
+                memberStats.set(message.memberId, previous);
+                renderMemberStats();
+            }
+            return;
+        }
+        if (message.type === 'host-reconnecting' && partyRole === 'join') {
+            setStatus('Host reconnecting…', 'running');
+            return;
+        }
+        if (message.type === 'host-reconnected' && partyRole === 'join') {
+            setStatus('Host reconnected. Synchronized.', 'running');
             return;
         }
         if (message.type === 'member-status' && partyRole === 'host') {
@@ -767,7 +814,16 @@
     }
 
     function applyPartyState(state) {
-        if (partyRole !== 'join' || !state || !Number.isInteger(state.revision) || state.revision <= lastPartyRevision) return;
+        if (!state || !Number.isInteger(state.revision)) return;
+        if (partyRole === 'host') {
+            if (state.config) applyPartyConfig(state.config);
+            partySessionRunning = Boolean(state.running || Number.isFinite(state.scheduledStartAt));
+            if (state.running) setStatus('Room restored. Joined browsers are still running.', 'running');
+            else if (Number.isFinite(state.scheduledStartAt)) setStatus('Room restored. A synchronized start is scheduled.', 'running');
+            updateControls();
+            return;
+        }
+        if (partyRole !== 'join' || state.revision <= lastPartyRevision) return;
         lastPartyRevision = state.revision;
         if (state.config) applyPartyConfig(state.config);
         if (state.running) startClicking(true, state.run || null);
@@ -794,8 +850,8 @@
         const element = resolveTarget();
         if (element) {
             setTargetDisplay(element);
-            showJoinedTargetMarker(element);
-            setStatus('Ready — target received from host.');
+            if (partyRole === 'join') showJoinedTargetMarker(element);
+            setStatus(partyRole === 'host' ? 'Room target restored.' : 'Ready — target received from host.');
             reportGuest('Ready');
         } else {
             clearTargetDisplay();
@@ -972,6 +1028,10 @@
         clicksCompleted++;
         recordHostClick();
         if (clicksPlanned > 0 && clicksCompleted >= clicksPlanned) {
+            if (mode === 'host') {
+                partySessionRunning = false;
+                sendParty({ type: 'command', command: 'stop' });
+            }
             stopClicking(`Finished ${clicksCompleted} ${clicksCompleted === 1 ? 'click' : 'clicks'}`);
             if (mode === 'join') reportGuest('Finished');
             return;
@@ -1008,6 +1068,7 @@
     }
 
     ui.chooseLocal.addEventListener('click', () => {
+        clearSavedPartySession();
         mode = 'local';
         target = null;
         targetSelector = '';
@@ -1015,7 +1076,10 @@
         showControlScreen();
         setStatus('Ready');
     });
-    ui.chooseHost.addEventListener('click', () => connectToParty('host', generatePartyCode()));
+    ui.chooseHost.addEventListener('click', () => {
+        const savedSession = getSavedPartySession();
+        connectToParty('host', savedSession?.role === 'host' ? savedSession.roomCode : generatePartyCode());
+    });
     ui.chooseJoin.addEventListener('click', () => {
         ui.joinForm.hidden = false;
         ui.joinCode.focus();
@@ -1042,7 +1106,10 @@
         startClicking();
     });
     ui.stop.addEventListener('click', () => {
-        if (mode === 'host') sendParty({ type: 'command', command: 'stop' });
+        if (mode === 'host') {
+            partySessionRunning = false;
+            sendParty({ type: 'command', command: 'stop' });
+        }
         stopClicking();
     });
     [ui.delay, ui.randomization, ui.count].forEach(element => element.addEventListener('change', () => {
@@ -1067,4 +1134,9 @@
     loadSettings();
     loadPanelPosition();
     showModeScreen();
+    const savedPartySession = getSavedPartySession();
+    if (savedPartySession) {
+        setModeStatus(`Restoring ${savedPartySession.role} session…`);
+        setTimeout(() => connectToParty(savedPartySession.role, savedPartySession.roomCode), 0);
+    }
 })();

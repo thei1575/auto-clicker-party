@@ -14,6 +14,7 @@ const MAX_MESSAGE_SIZE = 8 * 1024;
 const LONG_POLL_MS = 2_000;
 const HTTP_CLIENT_TTL_MS = 70_000;
 const MEMBER_STATUS_FLUSH_MS = 1_000;
+const RECONNECT_GRACE_MS = 5 * 60_000;
 let nextMemberId = 1;
 let acceptedConnectionsTotal = 0;
 let metricsScrapesTotal = 0;
@@ -120,7 +121,25 @@ function closeHttpWait(client) {
     writeJson(response, 204);
 }
 
-function removeFromRoom(client) {
+function endRoom(room, message = 'The host disconnected. This party has ended.') {
+    clearTimeout(room.countdownTimer);
+    clearTimeout(room.memberStatusFlushTimer);
+    clearTimeout(room.hostReconnectTimer);
+    for (const member of room.membersById.values()) clearTimeout(member.reconnectTimer);
+    broadcast(room, { type: 'party-ended', message });
+    for (const connectedClient of room.clients) {
+        clientInfo.delete(connectedClient);
+        if (connectedClient.kind === 'http') {
+            httpClients.delete(connectedClient.token);
+            closeHttpWait(connectedClient);
+        } else {
+            connectedClient.close(4001, 'Host disconnected');
+        }
+    }
+    rooms.delete(room.code);
+}
+
+function suspendClient(client) {
     const info = clientInfo.get(client);
     if (!info?.roomCode) return;
 
@@ -129,25 +148,48 @@ function removeFromRoom(client) {
 
     room.clients.delete(client);
     if (room.host === client) {
-        clearTimeout(room.countdownTimer);
-        clearTimeout(room.memberStatusFlushTimer);
-        broadcast(room, { type: 'party-ended', message: 'The host disconnected. This party has ended.' });
-        for (const member of room.clients) {
-            clientInfo.delete(member);
-            if (member.kind === 'http') {
-                httpClients.delete(member.token);
-                closeHttpWait(member);
-            } else {
-                member.close(4001, 'Host disconnected');
-            }
-        }
-        rooms.delete(info.roomCode);
+        room.host = null;
+        broadcast(room, { type: 'host-reconnecting' });
+        clearTimeout(room.hostReconnectTimer);
+        room.hostReconnectTimer = setTimeout(() => {
+            if (!room.host && rooms.get(room.code) === room) endRoom(room, 'The host did not reconnect. This party has ended.');
+        }, RECONNECT_GRACE_MS);
     } else {
         room.members.delete(client);
-        room.pendingMemberStatuses.delete(info.memberId);
-        send(room.host, { type: 'member-left', memberId: info.memberId });
+        const member = room.membersById.get(info.memberId);
+        if (member) {
+            member.client = null;
+            clearTimeout(member.reconnectTimer);
+            member.reconnectTimer = setTimeout(() => {
+                if (member.client || rooms.get(room.code) !== room) return;
+                room.membersById.delete(member.memberId);
+                room.membersByBrowserId.delete(member.browserId);
+                room.pendingMemberStatuses.delete(member.memberId);
+                if (room.host) send(room.host, { type: 'member-left', memberId: member.memberId });
+            }, RECONNECT_GRACE_MS);
+        }
+        if (room.host) send(room.host, { type: 'member-reconnecting', memberId: info.memberId });
     }
     clientInfo.delete(client);
+}
+
+function removeFromRoom(client) {
+    const info = clientInfo.get(client);
+    if (!info?.roomCode) return;
+    const room = rooms.get(info.roomCode);
+    if (!room) return;
+    room.clients.delete(client);
+    clientInfo.delete(client);
+    if (room.host === client) return endRoom(room);
+    room.members.delete(client);
+    const member = room.membersById.get(info.memberId);
+    if (member) {
+        clearTimeout(member.reconnectTimer);
+        room.membersById.delete(member.memberId);
+        room.membersByBrowserId.delete(member.browserId);
+    }
+    room.pendingMemberStatuses.delete(info.memberId);
+    if (room.host) send(room.host, { type: 'member-left', memberId: info.memberId });
 }
 
 function flushMemberStatuses(room) {
@@ -160,12 +202,15 @@ function flushMemberStatuses(room) {
 }
 
 function queueMemberStatus(room, memberId, message) {
-    room.pendingMemberStatuses.set(memberId, {
+    const status = {
         state: message.state,
         clicks: message.clicks,
         total: message.total,
         clockOffsetMs: message.clockOffsetMs
-    });
+    };
+    room.pendingMemberStatuses.set(memberId, status);
+    const member = room.membersById.get(memberId);
+    if (member) member.status = status;
     if (room.memberStatusFlushTimer === null) {
         room.memberStatusFlushTimer = setTimeout(() => flushMemberStatuses(room), MEMBER_STATUS_FLUSH_MS);
     }
@@ -201,6 +246,17 @@ function validMemberStatus(message) {
         Number.isFinite(message.clockOffsetMs) && Math.abs(message.clockOffsetMs) <= 300_000;
 }
 
+function supersedeClient(client) {
+    if (!client) return;
+    suspendClient(client);
+    if (client.kind === 'http') {
+        httpClients.delete(client.token);
+        closeHttpWait(client);
+    } else {
+        client.close(4002, 'Reconnected from another page');
+    }
+}
+
 function connectClient(client, message) {
     if ((message.type !== 'host' && message.type !== 'join') || !roomCodePattern.test(message.roomCode || '')) {
         send(client, { type: 'error', message: 'Invalid party code.' });
@@ -212,23 +268,45 @@ function connectClient(client, message) {
     }
 
     const code = message.roomCode;
+    const browserId = browserIdPattern.test(message.browserId || '') ? message.browserId : null;
     if (message.type === 'host') {
-        if (rooms.has(code)) {
-            send(client, { type: 'error', message: 'That party code is already in use.' });
+        const existingRoom = rooms.get(code);
+        if (existingRoom) {
+            if (!browserId || existingRoom.hostBrowserId !== browserId) {
+                send(client, { type: 'error', message: 'That party code is already in use.' });
+                return;
+            }
+            if (existingRoom.host) supersedeClient(existingRoom.host);
+            clearTimeout(existingRoom.hostReconnectTimer);
+            existingRoom.hostReconnectTimer = null;
+            existingRoom.host = client;
+            existingRoom.clients.add(client);
+            clientInfo.set(client, { roomCode: code, role: 'host', browserId });
+            acceptedConnectionsTotal++;
+            send(client, { type: 'welcome', role: 'host', roomCode: code, participants: existingRoom.clients.size, browserId });
+            for (const member of existingRoom.membersById.values()) {
+                send(client, { type: 'member-joined', memberId: member.memberId, browserId: member.browserId, status: member.status });
+            }
+            broadcast(existingRoom, { type: 'host-reconnected' }, client);
             return;
         }
         rooms.set(code, {
+            code,
             host: client,
+            hostBrowserId: browserId || `HOST-${crypto.randomUUID()}`,
             clients: new Set([client]),
             members: new Map(),
+            membersById: new Map(),
+            membersByBrowserId: new Map(),
             state: { revision: 0, running: false, config: null, run: null, scheduledStartAt: null },
             countdownTimer: null,
             pendingMemberStatuses: new Map(),
-            memberStatusFlushTimer: null
+            memberStatusFlushTimer: null,
+            hostReconnectTimer: null
         });
-        clientInfo.set(client, { roomCode: code, role: 'host' });
+        clientInfo.set(client, { roomCode: code, role: 'host', browserId });
         acceptedConnectionsTotal++;
-        send(client, { type: 'welcome', role: 'host', roomCode: code, participants: 1 });
+        send(client, { type: 'welcome', role: 'host', roomCode: code, participants: 1, browserId });
         return;
     }
 
@@ -237,14 +315,30 @@ function connectClient(client, message) {
         send(client, { type: 'error', message: 'No active party has that code.' });
         return;
     }
+    const persistedBrowserId = browserId || `SESSION-${nextMemberId}`;
+    let member = room.membersByBrowserId.get(persistedBrowserId);
+    if (member?.client) supersedeClient(member.client);
+    if (!member) {
+        member = { memberId: nextMemberId++, browserId: persistedBrowserId, client: null, reconnectTimer: null, status: null };
+        room.membersById.set(member.memberId, member);
+        room.membersByBrowserId.set(member.browserId, member);
+    }
+    clearTimeout(member.reconnectTimer);
+    member.reconnectTimer = null;
+    member.client = client;
     room.clients.add(client);
-    const memberId = nextMemberId++;
-    const browserId = browserIdPattern.test(message.browserId || '') ? message.browserId : `SESSION-${memberId}`;
-    room.members.set(client, memberId);
-    clientInfo.set(client, { roomCode: code, role: 'join', memberId, browserId });
+    room.members.set(client, member.memberId);
+    clientInfo.set(client, { roomCode: code, role: 'join', memberId: member.memberId, browserId: member.browserId });
     acceptedConnectionsTotal++;
-    send(client, { type: 'welcome', role: 'join', roomCode: code, participants: room.clients.size, memberId, browserId });
-    send(room.host, { type: 'member-joined', memberId, browserId });
+    send(client, { type: 'welcome', role: 'join', roomCode: code, participants: room.clients.size, memberId: member.memberId, browserId: member.browserId });
+    if (room.host) {
+        send(room.host, {
+            type: member.status ? 'member-reconnected' : 'member-joined',
+            memberId: member.memberId,
+            browserId: member.browserId,
+            status: member.status
+        });
+    }
 }
 
 function handleMessage(client, message) {
@@ -377,8 +471,8 @@ const httpServer = http.createServer(async (request, response) => {
                     clearTimeout(client.waitTimer);
                     client.waitTimer = null;
                     // A browser reload or navigation aborts its active long poll.
-                    // Remove the logical session immediately instead of showing a ghost member until TTL expiry.
-                    removeFromRoom(client);
+                    // Keep its logical party identity briefly so the reloaded script can resume it.
+                    suspendClient(client);
                     httpClients.delete(client.token);
                 }
             });
@@ -408,7 +502,7 @@ wss.on('connection', socket => {
             if (result) send(socket, result);
         } catch { send(socket, { type: 'error', message: 'Invalid JSON message.' }); }
     });
-    socket.on('close', () => removeFromRoom(socket));
+    socket.on('close', () => suspendClient(socket));
 });
 
 const heartbeat = setInterval(() => {
@@ -419,7 +513,7 @@ const heartbeat = setInterval(() => {
     const oldest = Date.now() - HTTP_CLIENT_TTL_MS;
     for (const client of httpClients.values()) {
         if (client.lastSeen < oldest) {
-            removeFromRoom(client);
+            suspendClient(client);
             httpClients.delete(client.token);
             closeHttpWait(client);
         }
