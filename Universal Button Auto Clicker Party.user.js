@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.4.1
+// @version      3.5.0
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -29,6 +29,8 @@
     const PANEL_POSITION_KEY = 'universalAutoClickerPartyPanelPosition';
     const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
     const SYNC_COUNTDOWN_MS = 5_000;
+    const INITIAL_CLOCK_SYNC_SAMPLES = 7;
+    const RESYNC_CLOCK_SYNC_SAMPLES = 5;
     const PARTY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const TARGET_ATTRIBUTE = 'data-auto-clicker-target';
     const HOVER_ATTRIBUTE = 'data-auto-clicker-hover';
@@ -55,6 +57,7 @@
     let reconnectAttempt = 0;
     let serverClockOffsetMs = 0;
     let clockSynced = false;
+    let clockSyncRttMs = Infinity;
     let clockSyncTimer = null;
     let partySendChain = Promise.resolve();
     let lastGuestReport = { state: '', time: 0 };
@@ -353,6 +356,7 @@
         lastPartyRevision = 0;
         serverClockOffsetMs = 0;
         clockSynced = false;
+        clockSyncRttMs = Infinity;
         if (clockSyncTimer !== null) clearInterval(clockSyncTimer);
         clockSyncTimer = null;
         hideJoinedTargetMarker();
@@ -508,22 +512,41 @@
         });
     }
 
-    async function synchronizePartyClock(session) {
-        const clientSentAt = Date.now();
-        const response = await partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, {
-            type: 'time-sync',
-            clientSentAt
-        });
-        const clientReceivedAt = Date.now();
-        const result = JSON.parse(response.responseText || '{}');
-        if (result.type !== 'time-sync' || !Number.isFinite(result.serverTime)) throw new Error('Invalid time sync response');
-        serverClockOffsetMs = result.serverTime - ((clientSentAt + clientReceivedAt) / 2);
+    async function synchronizePartyClock(session, sampleCount = clockSynced ? RESYNC_CLOCK_SYNC_SAMPLES : INITIAL_CLOCK_SYNC_SAMPLES) {
+        const samples = [];
+        for (let index = 0; index < sampleCount; index++) {
+            const clientSentAt = Date.now();
+            try {
+                const response = await partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, {
+                    type: 'time-sync',
+                    clientSentAt
+                });
+                const clientReceivedAt = Date.now();
+                const result = JSON.parse(response.responseText || '{}');
+                const serverReceivedAt = result.serverReceivedAt ?? result.serverTime;
+                const serverSentAt = result.serverSentAt ?? result.serverTime;
+                if (result.type !== 'time-sync' || !Number.isFinite(serverReceivedAt) || !Number.isFinite(serverSentAt)) continue;
+                const rtt = Math.max(0, (clientReceivedAt - clientSentAt) - (serverSentAt - serverReceivedAt));
+                samples.push({
+                    rtt,
+                    offset: ((serverReceivedAt - clientSentAt) + (serverSentAt - clientReceivedAt)) / 2
+                });
+            } catch (_) {}
+        }
+        if (samples.length === 0) throw new Error('Clock synchronization failed');
+
+        // NTP-style sync: use the median offset of the three fastest round trips.
+        // Keeping the best-quality estimate prevents a delayed browser request from
+        // making the visible clock difference jump by hundreds of milliseconds.
+        const fastest = samples.sort((a, b) => a.rtt - b.rtt).slice(0, Math.min(3, samples.length));
+        const offsets = fastest.map(sample => sample.offset).sort((a, b) => a - b);
+        const candidateOffset = offsets[Math.floor(offsets.length / 2)];
+        const candidateRtt = fastest[0].rtt;
+        if (!clockSynced || candidateRtt < clockSyncRttMs) {
+            serverClockOffsetMs = candidateOffset;
+            clockSyncRttMs = candidateRtt;
+        }
         clockSynced = true;
-        partyRequest('POST', `/api/party/message?token=${encodeURIComponent(session.token)}`, {
-            type: 'time-sync-ack',
-            clientSentAt,
-            clientReceivedAt
-        }).catch(() => {});
         if (partyRole === 'host') ui.partyStatus.textContent = 'Synchronized — ready.';
         if (partyRole === 'host') renderMemberStats();
         if (partyRole === 'join') reportGuest(timer !== null || countdownTimer !== null ? 'Running' : 'Ready');

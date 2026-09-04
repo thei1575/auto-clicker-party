@@ -252,7 +252,13 @@ function handleMessage(client, message) {
     if (!room) return send(client, { type: 'error', message: 'Join a party first.' });
     if (message.type === 'time-sync') {
         if (!Number.isFinite(message.clientSentAt)) return send(client, { type: 'error', message: 'Invalid time sync request.' });
-        return { type: 'time-sync', clientSentAt: message.clientSentAt, serverTime: Date.now() };
+        const serverReceivedAt = Date.now();
+        return {
+            type: 'time-sync',
+            clientSentAt: message.clientSentAt,
+            serverReceivedAt,
+            serverSentAt: Date.now()
+        };
     }
     if (message.type === 'time-sync-ack') return;
     if (info.role === 'join' && validMemberStatus(message)) {
