@@ -466,15 +466,12 @@ const httpServer = http.createServer(async (request, response) => {
                 }
             }, LONG_POLL_MS);
             response.on('close', () => {
-                if (client.waiting === response) {
-                    client.waiting = null;
-                    clearTimeout(client.waitTimer);
-                    client.waitTimer = null;
-                    // A browser reload or navigation aborts its active long poll.
-                    // Keep its logical party identity briefly so the reloaded script can resume it.
-                    suspendClient(client);
-                    httpClients.delete(client.token);
-                }
+                if (client.waiting !== response) return;
+                client.waiting = null;
+                clearTimeout(client.waitTimer);
+                client.waitTimer = null;
+                // Proxies can close an upstream response after delivering it. Keep the
+                // logical client until it expires or reconnects with the same browser ID.
             });
             return;
         }

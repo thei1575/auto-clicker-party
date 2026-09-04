@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.6.1
+// @version      3.6.2
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -120,6 +120,8 @@
             .party-code-wrap { display:flex; align-items:center; gap:7px; }
             .copy-code { padding:3px 6px; color:#bfdbfe; background:#1e3a5f; border:1px solid #3b82f6; border-radius:5px; cursor:pointer; font-size:10px; }
             .copy-code:hover { background:#254b78; }
+            .end-room { padding:3px 6px; color:#fecaca; background:#7f1d1d; border:1px solid #ef4444; border-radius:5px; cursor:pointer; font-size:10px; }
+            .end-room:hover { background:#991b1b; }
             .target { min-height:34px; margin-bottom:9px; padding:8px 9px; overflow:hidden; color:#94a3b8; background:#0f172a; border:1px solid #334155; border-radius:8px; text-overflow:ellipsis; white-space:nowrap; }
             .target.selected { color:#a7f3d0; border-color:#059669; }
             .grid { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin:10px 0; }
@@ -171,7 +173,7 @@
             <section class="screen" id="control-screen" hidden>
                 <div class="header"><button class="back" id="back">← Change mode</button><span id="mode-label"></span></div>
                 <section class="card host-only" id="host-card" hidden>
-                    <div class="card-title"><span>Party code</span><span class="party-code-wrap"><span id="party-code"></span><button class="copy-code" id="copy-code" title="Copy party code">Copy</button></span></div>
+                    <div class="card-title"><span>Party code</span><span class="party-code-wrap"><span id="party-code"></span><button class="copy-code" id="copy-code" title="Copy party code">Copy</button><button class="end-room" id="end-room" title="End this room for everyone">End room</button></span></div>
                     <div class="party-status" id="party-status">Connecting…</div>
                 </section>
                 <section class="card host-only" id="member-card" hidden>
@@ -201,7 +203,7 @@
     const ui = Object.fromEntries([
         'panel', 'hide', 'minimize', 'drag-handle', 'mode-screen', 'control-screen', 'choose-local', 'choose-host', 'choose-join',
         'join-form', 'join-code', 'connect-join', 'mode-status', 'back', 'mode-label',
-        'host-card', 'party-code', 'copy-code', 'party-status', 'member-card', 'member-count', 'party-progress', 'member-list',
+        'host-card', 'party-code', 'copy-code', 'end-room', 'party-status', 'member-card', 'member-count', 'party-progress', 'member-list',
         'join-card', 'client-id', 'target', 'selection-controls', 'select', 'control-settings', 'delay',
         'randomization', 'count', 'start', 'stop', 'status'
     ].map(id => [id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), shadow.getElementById(id)]));
@@ -1096,6 +1098,7 @@
     ui.dragHandle.addEventListener('pointerdown', startDragging);
     ui.minimize.addEventListener('click', toggleMinimized);
     ui.copyCode.addEventListener('click', copyPartyCode);
+    ui.endRoom.addEventListener('click', leaveToModePicker);
     ui.back.addEventListener('click', leaveToModePicker);
     ui.select.addEventListener('click', () => selecting ? endSelection() : beginSelection());
     ui.start.addEventListener('click', () => {
