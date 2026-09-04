@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.7.0
+// @version      3.8.0
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -41,6 +41,16 @@
     const PARTY_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const TARGET_ATTRIBUTE = 'data-auto-clicker-target';
     const HOVER_ATTRIBUTE = 'data-auto-clicker-hover';
+    const REJECTED_ATTRIBUTE = 'data-auto-clicker-rejected';
+    // Elements the DOM itself reports as interactive.
+    const INTERACTIVE_SELECTOR = [
+        'button', 'a[href]', 'area[href]', 'input:not([type="hidden"])', 'select', 'textarea',
+        'summary', 'label', '[onclick]',
+        '[role="button"]', '[role="link"]', '[role="checkbox"]', '[role="radio"]', '[role="switch"]',
+        '[role="tab"]', '[role="menuitem"]', '[role="menuitemcheckbox"]', '[role="menuitemradio"]',
+        '[role="option"]', '[role="treeitem"]', '[role="combobox"]', '[role="spinbutton"]'
+    ].join(',');
+    const MAX_CLICKABLE_DEPTH = 12;
 
     let mode = null;
     let target = null;
@@ -81,6 +91,7 @@
     pageStyle.textContent = `
         [${TARGET_ATTRIBUTE}] { outline: 3px solid #22c55e !important; outline-offset: 2px !important; }
         [${HOVER_ATTRIBUTE}] { outline: 3px solid #f59e0b !important; outline-offset: 2px !important; }
+        [${REJECTED_ATTRIBUTE}] { outline: 3px dashed #ef4444 !important; outline-offset: 2px !important; cursor: not-allowed !important; }
     `;
     (document.head || document.documentElement).appendChild(pageStyle);
 
@@ -1072,8 +1083,13 @@
     }
 
     function describeElement(element) {
-        const text = (element.innerText || element.value || element.getAttribute('aria-label') || '').trim();
-        return text ? `${element.tagName.toLowerCase()}: ${text.slice(0, 55)}` : element.tagName.toLowerCase();
+        const tag = element.tagName.toLowerCase();
+        const name = tag === 'input' ? `input[${element.type || 'text'}]` : tag;
+        // A checkbox's value is the useless literal "on", so name it by its label instead.
+        const toggle = tag === 'input' && (element.type === 'checkbox' || element.type === 'radio');
+        const text = (element.innerText || (toggle ? '' : element.value) || element.getAttribute('aria-label') ||
+            element.labels?.[0]?.innerText || element.title || '').replace(/\s+/g, ' ').trim();
+        return text ? `${name}: ${text.slice(0, 55)}` : name;
     }
 
     function setTargetDisplay(element) {
@@ -1109,16 +1125,71 @@
         else hideJoinedTargetMarker();
     }
 
+    function isDisabledElement(element) {
+        return element.disabled === true || element.getAttribute('aria-disabled') === 'true';
+    }
+
+    function canReceiveClicks(element, style) {
+        if (element.getClientRects().length === 0) return false;
+        return style.visibility !== 'hidden' && style.pointerEvents !== 'none';
+    }
+
+    function isInteractiveElement(element) {
+        if (element.nodeType !== Node.ELEMENT_NODE || isDisabledElement(element)) return false;
+        const style = window.getComputedStyle(element);
+        if (!canReceiveClicks(element, style)) return false;
+        try {
+            if (element.matches(INTERACTIVE_SELECTOR)) return true;
+        } catch (_) { /* fall through to the focusability check */ }
+        const tabIndex = element.getAttribute('tabindex');
+        return tabIndex !== null && Number(tabIndex) >= 0;
+    }
+
+    // Pages routinely attach their click handler with addEventListener, which the DOM cannot
+    // report. A pointer cursor is the reliable signal for those. Because `cursor` is inherited,
+    // the outermost element of a pointer region is the one that usually carries the handler.
+    function findPointerCursorRoot(element) {
+        if (element.nodeType !== Node.ELEMENT_NODE) return null;
+        const style = window.getComputedStyle(element);
+        if (style.cursor !== 'pointer' || !canReceiveClicks(element, style)) return null;
+        let node = element;
+        for (let depth = 0; depth < MAX_CLICKABLE_DEPTH; depth++) {
+            const parent = node.parentElement;
+            if (!parent || parent === document.body || parent === document.documentElement) break;
+            if (window.getComputedStyle(parent).cursor !== 'pointer') break;
+            node = parent;
+        }
+        return isDisabledElement(node) ? null : node;
+    }
+
+    // Resolves what a real click would actually activate: the innermost interactive ancestor,
+    // so hovering the label inside a button still selects the button itself.
+    function findClickableTarget(element) {
+        let node = element;
+        for (let depth = 0; node && depth < MAX_CLICKABLE_DEPTH; depth++) {
+            if (node === document.body || node === document.documentElement || host.contains(node)) break;
+            if (isInteractiveElement(node)) return node;
+            node = node.parentElement;
+        }
+        return findPointerCursorRoot(element);
+    }
+
     function clearHover() {
-        if (hoveredElement) hoveredElement.removeAttribute(HOVER_ATTRIBUTE);
+        if (hoveredElement) {
+            hoveredElement.removeAttribute(HOVER_ATTRIBUTE);
+            hoveredElement.removeAttribute(REJECTED_ATTRIBUTE);
+        }
         hoveredElement = null;
     }
 
     function handleHover(event) {
         if (!selecting || host.contains(event.target)) return;
         clearHover();
-        hoveredElement = event.target;
-        hoveredElement.setAttribute(HOVER_ATTRIBUTE, '');
+        const clickable = findClickableTarget(event.target);
+        hoveredElement = clickable || event.target;
+        hoveredElement.setAttribute(clickable ? HOVER_ATTRIBUTE : REJECTED_ATTRIBUTE, '');
+        if (clickable) setStatus(`Click to select ${describeElement(clickable)}`);
+        else setStatus('Not clickable — hover a button, link, or control.', 'error');
     }
 
     function endSelection(message = 'Selection cancelled') {
@@ -1134,12 +1205,19 @@
     function handleSelectionClick(event) {
         if (!selecting || host.contains(event.target)) return;
         event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation();
+        // Alt is the escape hatch for a handler no heuristic can see.
+        const clickable = event.altKey ? event.target : findClickableTarget(event.target);
+        if (!clickable) {
+            setStatus('That is not clickable. Pick a button, link, or control — hold Alt to select it anyway.', 'error');
+            return;
+        }
+        clearHover();
         if (target) target.removeAttribute(TARGET_ATTRIBUTE);
-        target = event.target;
+        target = clickable;
         targetSelector = createSelector(target);
         target.setAttribute(TARGET_ATTRIBUTE, '');
         setTargetDisplay(target);
-        endSelection('Button selected');
+        endSelection(event.altKey ? 'Target forced with Alt' : 'Button selected');
         syncHostConfig();
         if (partyRole) savePartySession(partyRole, partyCode);
     }
@@ -1149,7 +1227,7 @@
         selecting = true;
         ui.select.textContent = 'Click a button… (Esc to cancel)';
         ui.select.classList.add('selecting');
-        setStatus('Move over the page and click your target');
+        setStatus('Hover a clickable element and click it');
         document.addEventListener('mouseover', handleHover, true);
         document.addEventListener('click', handleSelectionClick, true);
     }
