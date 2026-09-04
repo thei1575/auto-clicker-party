@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.5.0
+// @version      3.5.1
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -27,6 +27,7 @@
     const MIN_DELAY = 20;
     const SETTINGS_KEY = 'universalAutoClickerPartySettings';
     const PANEL_POSITION_KEY = 'universalAutoClickerPartyPanelPosition';
+    const BROWSER_ID_KEY = 'universalAutoClickerPartyBrowserId';
     const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
     const SYNC_COUNTDOWN_MS = 5_000;
     const INITIAL_CLOCK_SYNC_SAMPLES = 7;
@@ -316,6 +317,16 @@
         return Array.from(values, value => PARTY_CODE_ALPHABET[value % PARTY_CODE_ALPHABET.length]).join('');
     }
 
+    function getBrowserId() {
+        const savedId = GM_getValue(BROWSER_ID_KEY, '');
+        if (/^B-[A-Z2-9]{6}$/.test(savedId)) return savedId;
+        const values = new Uint32Array(6);
+        crypto.getRandomValues(values);
+        const browserId = `B-${Array.from(values, value => PARTY_CODE_ALPHABET[value % PARTY_CODE_ALPHABET.length]).join('')}`;
+        GM_setValue(BROWSER_ID_KEY, browserId);
+        return browserId;
+    }
+
     function copyPartyCode() {
         if (!partyCode) return;
         try {
@@ -567,7 +578,7 @@
         if (role === 'host') ui.partyStatus.textContent = 'Connecting…';
         else setStatus('Connecting to host…');
         try {
-            const response = await partyRequest('POST', '/api/party/connect', { type: role, roomCode });
+            const response = await partyRequest('POST', '/api/party/connect', { type: role, roomCode, browserId: getBrowserId() });
             const result = JSON.parse(response.responseText);
             if (!result.token || !result.message) throw new Error('Invalid party server response');
             const session = { token: result.token, closed: false };
@@ -628,7 +639,7 @@
             header.className = 'member-head';
             const name = document.createElement('span');
             name.className = 'member-name';
-            name.textContent = `Browser ${id}`;
+            name.textContent = stats.browserId || `Session ${id}`;
             const state = document.createElement('span');
             state.className = 'member-state';
             state.textContent = stats.state;
@@ -700,7 +711,10 @@
             return;
         }
         if (message.type === 'member-joined' && partyRole === 'host') {
-            memberStats.set(message.memberId, { state: 'Joining…', clicks: 0, total: null, rate: 0, updatedAt: Date.now() });
+            memberStats.set(message.memberId, {
+                browserId: message.browserId || `Session ${message.memberId}`,
+                state: 'Joining…', clicks: 0, total: null, rate: 0, updatedAt: Date.now()
+            });
             renderMemberStats();
             if (timer !== null) sendParty(getPartyStartCommand());
             else syncHostConfig();
@@ -718,6 +732,7 @@
             const clickDelta = message.clicks - (previous?.clicks || 0);
             const rate = elapsed > 0 && clickDelta >= 0 ? clickDelta * 1_000 / elapsed : 0;
             memberStats.set(message.memberId, {
+                browserId: previous?.browserId || `Session ${message.memberId}`,
                 state: message.state,
                 clicks: message.clicks,
                 total: message.total,

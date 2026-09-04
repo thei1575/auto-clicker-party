@@ -7,6 +7,7 @@ const rooms = new Map();
 const clientInfo = new Map();
 const httpClients = new Map();
 const roomCodePattern = /^[A-Z2-9]{6,16}$/;
+const browserIdPattern = /^B-[A-Z2-9]{6}$/;
 const MAX_MESSAGE_SIZE = 8 * 1024;
 // Tampermonkey's request bridge is more reliable with frequent poll completion.
 // Commands are still delivered immediately when a poll is held open.
@@ -238,11 +239,12 @@ function connectClient(client, message) {
     }
     room.clients.add(client);
     const memberId = nextMemberId++;
+    const browserId = browserIdPattern.test(message.browserId || '') ? message.browserId : `SESSION-${memberId}`;
     room.members.set(client, memberId);
-    clientInfo.set(client, { roomCode: code, role: 'join', memberId });
+    clientInfo.set(client, { roomCode: code, role: 'join', memberId, browserId });
     acceptedConnectionsTotal++;
-    send(client, { type: 'welcome', role: 'join', roomCode: code, participants: room.clients.size, memberId });
-    send(room.host, { type: 'member-joined', memberId });
+    send(client, { type: 'welcome', role: 'join', roomCode: code, participants: room.clients.size, memberId, browserId });
+    send(room.host, { type: 'member-joined', memberId, browserId });
 }
 
 function handleMessage(client, message) {
