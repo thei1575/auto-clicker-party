@@ -284,7 +284,7 @@ function connectClient(client, message) {
             acceptedConnectionsTotal++;
             send(client, { type: 'welcome', role: 'host', roomCode: code, participants: existingRoom.clients.size, browserId });
             for (const member of existingRoom.membersById.values()) {
-                send(client, { type: 'member-joined', memberId: member.memberId, browserId: member.browserId, status: member.status });
+                send(client, { type: 'member-joined', memberId: member.memberId, browserId: member.browserId, status: member.status, connected: Boolean(member.client) });
             }
             broadcast(existingRoom, { type: 'host-reconnected' }, client);
             return;
@@ -335,7 +335,8 @@ function connectClient(client, message) {
             type: member.status ? 'member-reconnected' : 'member-joined',
             memberId: member.memberId,
             browserId: member.browserId,
-            status: member.status
+            status: member.status,
+            connected: true
         });
     }
 }

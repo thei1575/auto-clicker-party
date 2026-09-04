@@ -38,10 +38,15 @@ You can drag the panel by its title bar. Its position is remembered on future pa
 1. On the first screen, choose **Local**, **Host**, or **Join**.
 2. In **Local** mode, select a target button and control the clicker only in this browser.
 3. In **Host** mode, select the target button, share the generated party code, then set the delay, randomization, and click count. Pressing **Start** begins a fixed five-second synchronized countdown, shown in every panel, before all browsers click together. Stop is synchronized too.
-4. In **Join** mode, enter the code from the host. Joined browsers are read-only: the host's target selector and settings are applied automatically.
-5. The host dashboard shows party click progress and total clicks per second, plus every joined browser's readiness, state, progress, click rate, and measured clock difference.
+4. In **Join** mode, enter the code from the host. Joined browsers are read-only: the target selector and the settings are hidden, and the host's choices are applied automatically.
+5. Every browser shows its own browser ID: hosts in the **Party code** card, joined browsers in the **Joined party** card, and both in the title bar so the ID stays readable while the panel is minimized. The host names each joined browser by that same ID.
+6. The host dashboard keeps the party code, click progress, **Start**, **Stop**, and the status line in view at all times. Joined browsers appear in a compact two-column list with a status dot, state, progress, click rate, and measured clock difference; that list scrolls on its own, so the panel never grows past the window whether 2 or 20 browsers are connected.
 
-If a connection is interrupted, the script retries automatically. When a relay session has expired, it rejoins the party using the same code and immediately applies the host's current party state.
+## Reloads and reconnections
+
+Each browser stores its party role, party code, and browser ID, so reloading a page rejoins the same party by itself. A host reloads straight back into its own room with every joined browser still listed, and a joined browser reconnects without the code being typed again. Because reconnections are keyed on the stored browser ID, a browser resumes its existing place in the party rather than appearing twice.
+
+Interruptions are retried automatically. For three minutes after a reload or a dropped connection, a browser keeps its party code and waits — for the relay to answer again, or for a host that is still reloading to reopen the room — and only then asks for the code again. The host also remembers its selected button locally, so it restores the target even after the relay has been restarted. Panels show the current connection state, including `Reconnecting…`, `Party is not open yet. Waiting for the host…`, and, on the host, how many browsers are reconnecting.
 
 Before starting, each browser performs a three-step clock synchronization with the relay (request, timestamp response, acknowledgement), then refreshes it while connected. The host sends one seeded run plan, so every browser uses the same absolute click schedule and random delay sequence.
 

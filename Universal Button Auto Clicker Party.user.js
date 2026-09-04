@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Button Auto Clicker Party
 // @namespace    https://tampermonkey.net/
-// @version      3.6.3
+// @version      3.7.0
 // @description  Local auto-clicking or host-controlled synchronized click parties.
 // @author       Theis
 // @homepageURL   https://github.com/thei1575/auto-clicker-party
@@ -31,6 +31,10 @@
     const PARTY_SESSION_KEY = 'universalAutoClickerPartySession';
     const PARTY_HTTP_URL = 'https://clicker.oz1tnj.dk';
     const SYNC_COUNTDOWN_MS = 5_000;
+    // A restored or dropped guest keeps retrying its old room for this long, so a host
+    // that is still reloading does not force everybody to rejoin by hand.
+    const PARTY_RESTORE_WINDOW_MS = 3 * 60_000;
+    const PARTY_SESSION_TTL_MS = 12 * 60 * 60_000;
     const IDLE_POLL_INTERVAL_MS = 350;
     const INITIAL_CLOCK_SYNC_SAMPLES = 7;
     const RESYNC_CLOCK_SYNC_SAMPLES = 5;
@@ -66,6 +70,9 @@
     let partySendChain = Promise.resolve();
     let lastGuestReport = { state: '', time: 0 };
     let lastPartyRevision = 0;
+    let clientDisplayId = '';
+    let hostStateApplied = false;
+    let partyRestoreDeadline = 0;
     let hostRateSample = { clicks: 0, time: Date.now(), rate: 0 };
     let dragOffset = null;
     const memberStats = new Map();
@@ -92,21 +99,24 @@
         <style>
             :host { all:initial; }
             * { box-sizing:border-box; }
-            .panel { width:330px; padding:14px; color:#f8fafc; background:rgba(15,23,42,.98); border:1px solid #334155; border-radius:12px; box-shadow:0 14px 35px rgba(0,0,0,.38); font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; user-select:none; }
-            .panel.minimized { width:190px; padding:9px 10px; }
+            .panel { display:flex; flex-direction:column; width:328px; max-height:calc(100vh - 28px); padding:12px; color:#f8fafc; background:rgba(15,23,42,.98); border:1px solid #334155; border-radius:12px; box-shadow:0 14px 35px rgba(0,0,0,.38); font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; user-select:none; }
+            .panel.minimized { width:240px; max-height:none; padding:9px 10px; }
+            .panel.minimized .title { font-size:13px; }
             .panel.minimized .screen,.panel.minimized .footer { display:none; }
-            .header { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+            .header { display:flex; flex:0 0 auto; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
             #drag-handle { cursor:move; touch-action:none; }
             .panel.minimized #drag-handle { margin:0; }
-            .title { font-size:15px; font-weight:700; }
+            .title-wrap { display:flex; align-items:center; min-width:0; gap:6px; }
+            .title { min-width:0; overflow:hidden; font-size:15px; font-weight:700; text-overflow:ellipsis; white-space:nowrap; }
             button { font:inherit; }
-            .window-controls { display:flex; gap:2px; }
+            .window-controls { display:flex; flex:0 0 auto; gap:2px; }
             .close,.minimize,.back { padding:5px 7px; color:#cbd5e1; background:transparent; border:0; border-radius:7px; cursor:pointer; }
             .close { font-size:18px; }
             .minimize { font-size:18px; line-height:1; }
             .close:hover,.minimize:hover,.back:hover { background:#334155; }
-            .screen[hidden],.host-only[hidden],.join-only[hidden] { display:none; }
-            .panel.joined-mode #selection-controls,.panel.joined-mode #control-settings { display:none !important; }
+            .screen { display:flex; flex-direction:column; min-height:0; }
+            .screen[hidden],.host-only[hidden],.join-only[hidden],#header-id[hidden],#run-buttons[hidden] { display:none; }
+            .panel.joined-mode #selection-controls,.panel.joined-mode #control-settings,.panel.joined-mode #run-buttons { display:none !important; }
             .intro { margin:2px 0 12px; color:#94a3b8; }
             .mode-buttons { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
             .action { padding:10px; color:#fff; background:#2563eb; border:0; border-radius:8px; cursor:pointer; font-weight:700; }
@@ -114,48 +124,71 @@
             .action:disabled { opacity:.48; cursor:not-allowed; filter:none; }
             #choose-host { background:#7c3aed; }
             #stop { background:#dc2626; }
-            .card { margin-bottom:10px; padding:10px; background:#111c31; border:1px solid #334155; border-radius:9px; }
+            .scroll-area { flex:1 1 auto; min-height:0; margin-right:-4px; padding-right:4px; overflow-y:auto; overscroll-behavior:contain; }
+            .scroll-area::-webkit-scrollbar,.member-list::-webkit-scrollbar { width:7px; }
+            .scroll-area::-webkit-scrollbar-thumb,.member-list::-webkit-scrollbar-thumb { background:#334155; border-radius:4px; }
+            .card { margin-bottom:8px; padding:8px 9px; background:#111c31; border:1px solid #334155; border-radius:9px; }
+            #host-card { border-color:#5b21b6; }
+            #join-card { border-color:#0369a1; }
+            #host-card,#join-card { position:sticky; top:0; z-index:2; box-shadow:0 6px 14px rgba(15,23,42,.6); }
             #join-form { margin-top:12px; margin-bottom:0; }
             #join-form .action { width:100%; margin-top:12px; }
-            .card-title { display:flex; justify-content:space-between; align-items:center; margin-bottom:7px; color:#bfdbfe; font-weight:700; }
-            .party-code-wrap { display:flex; align-items:center; gap:7px; }
+            .card-title { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:5px; color:#bfdbfe; font-weight:700; }
+            .badge { padding:2px 6px; border-radius:999px; font-size:9px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }
+            .badge.host,.header-id.host { color:#e9d5ff; background:#4c1d95; border:1px solid #7c3aed; }
+            .badge.client,.header-id.client { color:#bae6fd; background:#0c4a6e; border:1px solid #0284c7; }
+            .header-id { flex:0 0 auto; padding:2px 6px; border-radius:999px; font-size:9px; font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
+            .party-code-wrap { display:flex; flex:0 0 auto; align-items:center; gap:6px; font-variant-numeric:tabular-nums; }
             .copy-code { padding:3px 6px; color:#bfdbfe; background:#1e3a5f; border:1px solid #3b82f6; border-radius:5px; cursor:pointer; font-size:10px; }
             .copy-code:hover { background:#254b78; }
             .end-room { padding:3px 6px; color:#fecaca; background:#7f1d1d; border:1px solid #ef4444; border-radius:5px; cursor:pointer; font-size:10px; }
             .end-room:hover { background:#991b1b; }
-            .target { min-height:34px; margin-bottom:9px; padding:8px 9px; overflow:hidden; color:#94a3b8; background:#0f172a; border:1px solid #334155; border-radius:8px; text-overflow:ellipsis; white-space:nowrap; }
+            .id-row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:5px 0; }
+            .id-label { color:#64748b; font-size:10px; letter-spacing:.05em; text-transform:uppercase; }
+            .id-value { color:#e2e8f0; font-weight:700; font-variant-numeric:tabular-nums; }
+            .target { min-height:32px; margin-bottom:8px; padding:7px 9px; overflow:hidden; color:#94a3b8; background:#0f172a; border:1px solid #334155; border-radius:8px; text-overflow:ellipsis; white-space:nowrap; }
             .target.selected { color:#a7f3d0; border-color:#059669; }
-            .grid { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin:10px 0; }
+            .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:8px 0 0; }
             .full { grid-column:1/-1; }
             label { display:block; color:#cbd5e1; font-size:12px; }
-            input { width:100%; margin-top:4px; padding:8px; color:#f8fafc; background:#020617; border:1px solid #475569; border-radius:7px; outline:none; font:inherit; }
+            input { width:100%; margin-top:4px; padding:7px 8px; color:#f8fafc; background:#020617; border:1px solid #475569; border-radius:7px; outline:none; font:inherit; }
             input:focus { border-color:#60a5fa; }
             .hint { margin-top:3px; color:#64748b; font-size:10px; }
             .buttons { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
             #select { grid-column:1/-1; background:#475569; }
             #select.selecting { background:#d97706; }
-            .status { min-height:19px; margin-top:10px; color:#94a3b8; }
+            .run-bar { flex:0 0 auto; margin-top:9px; padding-top:9px; border-top:1px solid #243247; }
+            .run-progress { margin-bottom:7px; color:#86efac; font-size:11px; font-weight:600; font-variant-numeric:tabular-nums; text-align:center; }
+            .status { min-height:17px; margin-top:8px; color:#94a3b8; font-size:12px; }
             .status.running { color:#86efac; }
             .status.error { color:#fca5a5; }
+            #mode-status { margin-top:12px; }
             .party-status { color:#94a3b8; font-size:11px; }
-            .member-list { display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:6px; max-height:224px; margin-top:7px; padding-right:2px; overflow-y:auto; overscroll-behavior:contain; }
-            .member { display:grid; gap:5px; padding:7px; color:#cbd5e1; background:#0f172a; border:1px solid #243247; border-radius:7px; font-size:11px; }
-            .member-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
-            .member-name { color:#e2e8f0; font-weight:700; }
-            .member-state { max-width:145px; overflow:hidden; color:#a7f3d0; font-size:10px; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
-            .member-metrics { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:5px; }
-            .member-metric { min-width:0; padding:5px 6px; background:#111c31; border-radius:5px; }
-            .member-metric-label { display:block; color:#64748b; font-size:9px; letter-spacing:.04em; text-transform:uppercase; }
-            .member-metric-value { display:block; margin-top:1px; overflow:hidden; color:#bfdbfe; font-size:10px; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
-            .client-id { padding:3px 6px; color:#bbf7d0; background:#14532d; border:1px solid #22c55e; border-radius:999px; font-size:10px; font-variant-numeric:tabular-nums; }
-            .party-progress { color:#86efac; font-size:10px; font-weight:500; }
-            .readonly { color:#94a3b8; }
-            .footer { margin-top:11px; padding-top:9px; color:#64748b; border-top:1px solid #243247; font-size:10px; text-align:center; }
+            .party-status.ok { color:#86efac; }
+            .party-status.warn { color:#fcd34d; }
+            .party-status.error { color:#fca5a5; }
+            .member-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(128px,1fr)); gap:5px; max-height:min(30vh,188px); margin-right:-4px; padding-right:4px; overflow-y:auto; overscroll-behavior:contain; }
+            .member { display:grid; gap:2px; padding:5px 6px; background:#0f172a; border:1px solid #243247; border-radius:6px; font-size:10px; }
+            .member.offline { border-color:#78350f; opacity:.72; }
+            .member-head { display:flex; align-items:center; min-width:0; gap:5px; }
+            .dot { flex:0 0 auto; width:6px; height:6px; border-radius:50%; background:#64748b; }
+            .dot.ready { background:#38bdf8; }
+            .dot.running { background:#22c55e; }
+            .dot.warn { background:#f59e0b; }
+            .dot.error { background:#ef4444; }
+            .member-id { flex:1 1 auto; min-width:0; overflow:hidden; color:#e2e8f0; font-weight:700; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
+            .member-clock { flex:0 0 auto; color:#64748b; font-variant-numeric:tabular-nums; }
+            .member-line { display:flex; align-items:center; justify-content:space-between; min-width:0; gap:6px; }
+            .member-state { overflow:hidden; color:#93c5fd; text-overflow:ellipsis; white-space:nowrap; }
+            .member-nums { flex:0 0 auto; color:#cbd5e1; font-variant-numeric:tabular-nums; }
+            .client-id { flex:0 0 auto; padding:3px 6px; color:#bbf7d0; background:#14532d; border:1px solid #22c55e; border-radius:999px; font-size:10px; font-variant-numeric:tabular-nums; }
+            .readonly { color:#94a3b8; font-size:11px; }
+            .footer { flex:0 0 auto; margin-top:9px; padding-top:8px; color:#64748b; border-top:1px solid #243247; font-size:10px; text-align:center; }
             .footer a { color:#93c5fd; text-decoration:none; }
             .footer a:hover { text-decoration:underline; }
         </style>
         <section class="panel" id="panel">
-            <div class="header" id="drag-handle" title="Drag to move this window"><div class="title">Auto Clicker</div><div class="window-controls"><button class="minimize" id="minimize" title="Minimize" aria-label="Minimize">−</button><button class="close" id="hide" title="Hide panel" aria-label="Hide panel">×</button></div></div>
+            <div class="header" id="drag-handle" title="Drag to move this window"><div class="title-wrap"><div class="title">Auto Clicker</div><span class="header-id" id="header-id" hidden></span></div><div class="window-controls"><button class="minimize" id="minimize" title="Minimize" aria-label="Minimize">&minus;</button><button class="close" id="hide" title="Hide panel" aria-label="Hide panel">&times;</button></div></div>
 
             <section class="screen" id="mode-screen">
                 <p class="intro">Choose how this browser should participate.</p>
@@ -172,41 +205,50 @@
             </section>
 
             <section class="screen" id="control-screen" hidden>
-                <div class="header"><button class="back" id="back">← Change mode</button><span id="mode-label"></span></div>
-                <section class="card host-only" id="host-card" hidden>
-                    <div class="card-title"><span>Party code</span><span class="party-code-wrap"><span id="party-code"></span><button class="copy-code" id="copy-code" title="Copy party code">Copy</button><button class="end-room" id="end-room" title="End this room for everyone">End room</button></span></div>
-                    <div class="party-status" id="party-status">Connecting…</div>
-                </section>
-                <section class="card host-only" id="member-card" hidden>
-                    <div class="card-title"><span>Party progress</span><span class="party-progress" id="party-progress">0 clicks · 0.0/s</span></div>
-                    <div class="party-status">Joined browsers: <span id="member-count">0</span></div>
-                    <div class="member-list" id="member-list"><div class="readonly">No browsers joined yet.</div></div>
-                </section>
-                <section class="card join-only" id="join-card" hidden>
-                    <div class="card-title"><span>Joined party</span><span class="client-id" id="client-id">Connecting…</span></div>
-                    <div class="readonly">The host selects the target and controls all settings. This browser will follow automatically.</div>
-                </section>
-                <div class="target" id="target">No button selected</div>
-                <div class="buttons host-only" id="selection-controls"><button class="action" id="select">Select button</button></div>
-                <div id="control-settings">
-                    <div class="grid">
-                        <label>Base delay (ms)<input id="delay" type="number" min="${MIN_DELAY}" step="10" value="1000"></label>
-                        <label>Randomize ± (ms)<input id="randomization" type="number" min="0" step="10" value="0"></label>
-                        <label class="full">Number of clicks<input id="count" type="number" min="0" step="1" value="10"><div class="hint">0 = unlimited clicks</div></label>
+                <div class="header"><button class="back" id="back">&larr; Change mode</button><span id="mode-label"></span></div>
+                <div class="scroll-area">
+                    <section class="card host-only" id="host-card" hidden>
+                        <div class="card-title"><span>Party code <span class="badge host">Host</span></span><span class="party-code-wrap"><span id="party-code"></span><button class="copy-code" id="copy-code" title="Copy party code">Copy</button><button class="end-room" id="end-room" title="End this room for everyone">End</button></span></div>
+                        <div class="id-row"><span class="id-label">This browser</span><span class="client-id" id="host-id">&mdash;</span></div>
+                        <div class="party-status" id="party-status">Connecting&hellip;</div>
+                    </section>
+                    <section class="card host-only" id="member-card" hidden>
+                        <div class="card-title"><span>Joined browsers</span><span class="party-status" id="member-summary">0 joined</span></div>
+                        <div class="member-list" id="member-list"><div class="readonly">No browsers joined yet.</div></div>
+                    </section>
+                    <section class="card join-only" id="join-card" hidden>
+                        <div class="card-title"><span>Joined party <span class="badge client">Client</span></span><span class="client-id" id="client-id">&mdash;</span></div>
+                        <div class="id-row"><span class="id-label">Party code</span><span class="id-value" id="join-room-code">&mdash;</span></div>
+                        <div class="party-status" id="join-connection">Connecting&hellip;</div>
+                        <div class="readonly">The host selects the target and controls every setting.</div>
+                    </section>
+                    <div class="target" id="target">No button selected</div>
+                    <div class="buttons host-only" id="selection-controls"><button class="action" id="select">Select button</button></div>
+                    <div id="control-settings">
+                        <div class="grid">
+                            <label>Base delay (ms)<input id="delay" type="number" min="${MIN_DELAY}" step="10" value="1000"></label>
+                            <label>Randomize &plusmn; (ms)<input id="randomization" type="number" min="0" step="10" value="0"></label>
+                            <label class="full">Number of clicks<input id="count" type="number" min="0" step="1" value="10"><div class="hint">0 = unlimited clicks</div></label>
+                        </div>
                     </div>
-                    <div class="buttons"><button class="action" id="start">Start</button><button class="action" id="stop" disabled>Stop</button></div>
                 </div>
-                <div class="status" id="status">Ready</div>
+                <div class="run-bar">
+                    <div class="run-progress host-only" id="party-progress" hidden>0 clicks &middot; 0.0/s</div>
+                    <div class="buttons" id="run-buttons"><button class="action" id="start">Start</button><button class="action" id="stop" disabled>Stop</button></div>
+                    <div class="status" id="status">Ready</div>
+                </div>
             </section>
-            <footer class="footer">© 2026 Theis N. Jensen · <a href="https://github.com/thei1575/auto-clicker-party" target="_blank" rel="noopener noreferrer">GitHub</a></footer>
+            <footer class="footer">&copy; 2026 Theis N. Jensen &middot; <a href="https://github.com/thei1575/auto-clicker-party" target="_blank" rel="noopener noreferrer">GitHub</a></footer>
         </section>`;
 
     const ui = Object.fromEntries([
-        'panel', 'hide', 'minimize', 'drag-handle', 'mode-screen', 'control-screen', 'choose-local', 'choose-host', 'choose-join',
+        'panel', 'hide', 'minimize', 'drag-handle', 'header-id', 'mode-screen', 'control-screen', 'choose-local', 'choose-host', 'choose-join',
         'join-form', 'join-code', 'connect-join', 'mode-status', 'back', 'mode-label',
-        'host-card', 'party-code', 'copy-code', 'end-room', 'party-status', 'member-card', 'member-count', 'party-progress', 'member-list',
-        'join-card', 'client-id', 'target', 'selection-controls', 'select', 'control-settings', 'delay',
-        'randomization', 'count', 'start', 'stop', 'status'
+        'host-card', 'party-code', 'copy-code', 'end-room', 'party-status', 'host-id',
+        'member-card', 'member-summary', 'party-progress', 'member-list',
+        'join-card', 'client-id', 'join-room-code', 'join-connection',
+        'target', 'selection-controls', 'select', 'control-settings', 'delay',
+        'randomization', 'count', 'run-buttons', 'start', 'stop', 'status'
     ].map(id => [id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), shadow.getElementById(id)]));
 
     function setStatus(message, type = '') {
@@ -290,6 +332,7 @@
         ui.modeScreen.hidden = false;
         ui.controlScreen.hidden = true;
         ui.joinForm.hidden = true;
+        updateIdentityDisplay();
         setModeStatus('Local controls stay in this browser. Host controls sync to joined browsers.');
     }
 
@@ -305,6 +348,9 @@
         ui.joinCard.hidden = !isJoin;
         ui.selectionControls.hidden = isJoin;
         ui.controlSettings.hidden = isJoin;
+        ui.runButtons.hidden = isJoin;
+        ui.partyProgress.hidden = !isHost;
+        updateIdentityDisplay();
         updateControls();
     }
 
@@ -340,15 +386,70 @@
     function getSavedPartySession() {
         const session = GM_getValue(PARTY_SESSION_KEY, null);
         if (!session || (session.role !== 'host' && session.role !== 'join') || !/^[A-Z2-9]{6,16}$/.test(session.roomCode || '')) return null;
-        return session.origin === location.origin ? session : null;
+        if (session.origin !== location.origin) return null;
+        if (Number.isFinite(session.savedAt) && Date.now() - session.savedAt > PARTY_SESSION_TTL_MS) return null;
+        return session;
     }
 
     function savePartySession(role, roomCode) {
-        GM_setValue(PARTY_SESSION_KEY, { role, roomCode, origin: location.origin });
+        const previous = GM_getValue(PARTY_SESSION_KEY, null);
+        const keptSelector = previous?.roomCode === roomCode ? previous.targetSelector : '';
+        GM_setValue(PARTY_SESSION_KEY, {
+            role,
+            roomCode,
+            origin: location.origin,
+            browserId: getBrowserId(),
+            targetSelector: targetSelector || keptSelector || '',
+            savedAt: Date.now()
+        });
+    }
+
+    function restoreHostTargetFromSession() {
+        const session = getSavedPartySession();
+        if (session?.role !== 'host' || typeof session.targetSelector !== 'string' || !session.targetSelector) return;
+        targetSelector = session.targetSelector;
+        target = null;
+        if (resolveTarget()) {
+            setTargetDisplay(target);
+            setStatus('Room target restored.');
+            syncHostConfig();
+        } else {
+            clearTargetDisplay();
+            setStatus('The saved target is not on this page. Select a button.', 'error');
+        }
     }
 
     function clearSavedPartySession() {
         GM_setValue(PARTY_SESSION_KEY, null);
+    }
+
+    function currentBrowserLabel() {
+        return clientDisplayId || getBrowserId();
+    }
+
+    // The browser ID identifies this panel in every host dashboard, so it stays on screen
+    // in the title bar as well - the panel is usually minimized on joined browsers.
+    function updateIdentityDisplay() {
+        const label = currentBrowserLabel();
+        ui.hostId.textContent = label;
+        ui.clientId.textContent = label;
+        ui.joinRoomCode.textContent = partyCode || '\u2014';
+        if (mode !== 'host' && mode !== 'join') {
+            ui.headerId.hidden = true;
+            return;
+        }
+        const isHost = mode === 'host';
+        ui.headerId.hidden = false;
+        ui.headerId.className = `header-id ${isHost ? 'host' : 'client'}`;
+        ui.headerId.textContent = label;
+        ui.headerId.title = `${isHost ? 'Host' : 'Client'} browser ID ${label}${partyCode ? ` \u00b7 party ${partyCode}` : ''}`;
+    }
+
+    function setPartyConnectionStatus(message, type = '') {
+        for (const element of [ui.partyStatus, ui.joinConnection]) {
+            element.textContent = message;
+            element.className = `party-status ${type}`.trim();
+        }
     }
 
     function copyPartyCode() {
@@ -397,6 +498,9 @@
         clockSyncTimer = null;
         hideJoinedTargetMarker();
         memberStats.clear();
+        clientDisplayId = '';
+        partyRestoreDeadline = 0;
+        hostStateApplied = false;
         if (clearSavedSession) clearSavedPartySession();
     }
 
@@ -486,18 +590,16 @@
         if (partyRole === 'host') sendParty(getPartyConfig());
     }
 
-    function connectToParty(role, roomCode) {
+    function connectToParty(role, roomCode, restoring = false) {
         partyCode = roomCode;
         mode = role;
+        clientDisplayId = '';
+        partyRestoreDeadline = restoring ? Date.now() + PARTY_RESTORE_WINDOW_MS : 0;
         savePartySession(role, roomCode);
         showControlScreen();
-        if (role === 'host') {
-            ui.partyCode.textContent = roomCode;
-            ui.partyStatus.textContent = 'Connecting…';
-        } else {
-            setStatus('Connecting to host…');
-        }
-
+        ui.partyCode.textContent = roomCode;
+        setPartyConnectionStatus(restoring ? 'Restoring saved session…' : 'Connecting…');
+        if (role === 'join') setStatus(restoring ? 'Restoring saved session…' : 'Connecting to host…');
         startHttpParty(role, roomCode);
     }
 
@@ -508,22 +610,23 @@
         setModeStatus(message, 'error');
     }
 
-    function schedulePartyReconnect(role = mode, roomCode = partyCode) {
+    function schedulePartyReconnect(role = mode, roomCode = partyCode, statusMessage = null) {
         if (reconnectTimer !== null || !role || !roomCode) return;
         const previousSession = httpParty;
         if (previousSession) previousSession.closed = true;
         httpParty = null;
         partyRole = null;
         lastPartyRevision = 0;
+        hostStateApplied = false;
         clockSynced = false;
         if (clockSyncTimer !== null) clearInterval(clockSyncTimer);
         clockSyncTimer = null;
         if (mode === 'join') stopClicking('Connection lost. Reconnecting…');
-        if (role === 'host') ui.partyStatus.textContent = 'Reconnecting…';
-        else setStatus('Connection lost. Reconnecting…', 'error');
         updateControls();
         const delay = Math.min(10_000, 1_000 * (2 ** Math.min(reconnectAttempt, 4)));
         reconnectAttempt++;
+        setPartyConnectionStatus(statusMessage || `Connection lost. Reconnecting in ${Math.round(delay / 1_000)}s (attempt ${reconnectAttempt})…`, 'warn');
+        if (role === 'join' && !statusMessage) setStatus('Connection lost. Reconnecting…', 'error');
         reconnectTimer = setTimeout(() => {
             reconnectTimer = null;
             startHttpParty(role, roomCode, true);
@@ -543,6 +646,7 @@
                     else {
                         const error = new Error(`Party server returned ${response.status}`);
                         error.status = response.status;
+                        error.body = response.responseText || '';
                         reject(error);
                     }
                 },
@@ -587,8 +691,14 @@
             clockSyncRttMs = candidateRtt;
         }
         clockSynced = true;
-        if (partyRole === 'host') ui.partyStatus.textContent = 'Synchronized — ready.';
-        if (partyRole === 'host') renderMemberStats();
+        if (partyRole === 'host') {
+            setPartyConnectionStatus(memberStats.size
+                ? `Synchronized · ${memberStats.size} browser${memberStats.size === 1 ? '' : 's'} joined.`
+                : 'Synchronized. Waiting for browsers to join.', 'ok');
+            renderMemberStats();
+        } else if (partyRole === 'join') {
+            setPartyConnectionStatus('Connected · clock synchronized with the host.', 'ok');
+        }
         if (partyRole === 'join') reportGuest(timer !== null || countdownTimer !== null ? 'Running' : 'Ready');
         updateControls();
     }
@@ -604,8 +714,9 @@
     async function startHttpParty(role, roomCode, reconnecting = false) {
         if (partyRole || httpParty) return;
         clearConnectionTimer();
-        if (role === 'host') ui.partyStatus.textContent = 'Connecting…';
-        else setStatus('Connecting to host…');
+        if (reconnecting) setPartyConnectionStatus('Reconnecting…', 'warn');
+        else setPartyConnectionStatus('Connecting…');
+        if (role === 'join' && !reconnecting) setStatus('Connecting to host…');
         try {
             const response = await partyRequest('POST', '/api/party/connect', { type: role, roomCode, browserId: getBrowserId() });
             const result = JSON.parse(response.responseText);
@@ -618,7 +729,26 @@
             applyPartyState(result.state);
             beginClockResync(session);
             pollHttpParty(session);
-        } catch (_) {
+        } catch (error) {
+            const missingRoom = /no active party/i.test(error?.body || '');
+            if (/already in use/i.test(error?.body || '')) {
+                connectionFailed('Another browser is already hosting that party code.');
+                return;
+            }
+            // A restored or dropped session keeps its party code and retries: the relay may be
+            // restarting, or the host may still be reloading its own page. Rejoining by hand
+            // is only required once that window has passed.
+            if (Date.now() < partyRestoreDeadline) {
+                schedulePartyReconnect(role, roomCode, missingRoom
+                    ? 'Party is not open yet. Waiting for the host…'
+                    : 'Party server unreachable. Retrying…');
+                if (role === 'join') setStatus(missingRoom ? 'Waiting for the host to reopen the party…' : 'Reconnecting…');
+                return;
+            }
+            if (missingRoom) {
+                connectionFailed(reconnecting ? 'That party is no longer open.' : 'No active party has that code.');
+                return;
+            }
             if (reconnecting) schedulePartyReconnect(role, roomCode);
             else connectionFailed('Could not connect to the party server.');
         }
@@ -640,21 +770,83 @@
                         schedulePartyReconnect(mode, partyCode);
                         break;
                     }
-                    setStatus('Party connection interrupted. Retrying…', 'error');
+                    setPartyConnectionStatus('Connection interrupted. Retrying…', 'warn');
                     await new Promise(resolve => setTimeout(resolve, 1_000));
                 }
             }
         }
     }
 
+    const SHORT_MEMBER_STATES = {
+        'Waiting for host': 'Awaiting host',
+        'Waiting for target': 'Awaiting target',
+        'Target not found': 'No target',
+        'Invalid host settings': 'Bad settings',
+        'Stopped by host': 'Stopped'
+    };
+
+    function memberTone(state, connected) {
+        if (!connected) return 'warn';
+        const text = String(state || '');
+        if (/not found|invalid|failed/i.test(text)) return 'error';
+        if (/^running/i.test(text)) return 'running';
+        if (/reconnect|waiting|joining/i.test(text)) return 'warn';
+        if (/^ready|^finished|^stopped/i.test(text)) return 'ready';
+        return '';
+    }
+
+    function addMemberRow(id, stats) {
+        const connected = stats.connected !== false;
+        const label = stats.browserId || `Session ${id}`;
+        const state = connected ? (stats.state || 'Ready') : 'Reconnecting…';
+        const row = document.createElement('div');
+        row.className = `member${connected ? '' : ' offline'}`;
+        row.title = `${label} · ${state}`;
+
+        const head = document.createElement('div');
+        head.className = 'member-head';
+        const dot = document.createElement('span');
+        dot.className = `dot ${memberTone(state, connected)}`.trim();
+        const name = document.createElement('span');
+        name.className = 'member-id';
+        name.textContent = label;
+        const clock = document.createElement('span');
+        clock.className = 'member-clock';
+        clock.textContent = Number.isFinite(stats.timeDiffMs)
+            ? `${stats.timeDiffMs >= 0 ? '+' : ''}${Math.round(stats.timeDiffMs)}ms`
+            : '—';
+        head.append(dot, name, clock);
+
+        const line = document.createElement('div');
+        line.className = 'member-line';
+        const stateText = document.createElement('span');
+        stateText.className = 'member-state';
+        stateText.textContent = SHORT_MEMBER_STATES[state] || state;
+        const numbers = document.createElement('span');
+        numbers.className = 'member-nums';
+        numbers.textContent = `${stats.clicks}/${stats.total === null ? '∞' : stats.total} · ${(stats.rate || 0).toFixed(1)}/s`;
+        line.append(stateText, numbers);
+
+        row.append(head, line);
+        ui.memberList.appendChild(row);
+    }
+
     function renderMemberStats() {
-        ui.memberCount.textContent = String(memberStats.size);
         const members = Array.from(memberStats.values());
+        const offline = members.filter(stats => stats.connected === false).length;
+        const running = members.filter(stats => stats.connected !== false && /^running/i.test(stats.state || '')).length;
+        const summary = [`${members.length} joined`];
+        if (running) summary.push(`${running} running`);
+        if (offline) summary.push(`${offline} reconnecting`);
+        ui.memberSummary.textContent = summary.join(' · ');
+        ui.memberSummary.className = `party-status${offline ? ' warn' : ''}`;
+
         const totalClicks = clicksCompleted + members.reduce((total, stats) => total + stats.clicks, 0);
         const hasUnlimited = clicksPlanned === 0 || members.some(stats => stats.total === null);
         const totalPlanned = clicksPlanned + members.reduce((total, stats) => total + (stats.total || 0), 0);
         const clickRate = hostRateSample.rate + members.reduce((total, stats) => total + (stats.rate || 0), 0);
         ui.partyProgress.textContent = `${totalClicks}${hasUnlimited ? ' / ∞' : ` / ${totalPlanned}`} clicks · ${clickRate.toFixed(1)}/s`;
+
         ui.memberList.replaceChildren();
         if (memberStats.size === 0) {
             const empty = document.createElement('div');
@@ -663,43 +855,7 @@
             ui.memberList.appendChild(empty);
             return;
         }
-        for (const [id, stats] of memberStats) {
-            const row = document.createElement('div');
-            row.className = 'member';
-            const header = document.createElement('div');
-            header.className = 'member-head';
-            const name = document.createElement('span');
-            name.className = 'member-name';
-            name.textContent = stats.browserId || `Session ${id}`;
-            const state = document.createElement('span');
-            state.className = 'member-state';
-            state.textContent = stats.state;
-            const total = stats.total === null ? '∞' : stats.total;
-            const clock = Number.isFinite(stats.timeDiffMs)
-                ? `${stats.timeDiffMs >= 0 ? '+' : ''}${Math.round(stats.timeDiffMs)} ms`
-                : '—';
-            const metrics = document.createElement('div');
-            metrics.className = 'member-metrics';
-            for (const [label, value] of [
-                ['Progress', `${stats.clicks} / ${total}`],
-                ['Rate', `${(stats.rate || 0).toFixed(1)}/s`],
-                ['Clock', clock],
-            ]) {
-                const metric = document.createElement('div');
-                metric.className = 'member-metric';
-                const metricLabel = document.createElement('span');
-                metricLabel.className = 'member-metric-label';
-                metricLabel.textContent = label;
-                const metricValue = document.createElement('span');
-                metricValue.className = 'member-metric-value';
-                metricValue.textContent = value;
-                metric.append(metricLabel, metricValue);
-                metrics.appendChild(metric);
-            }
-            header.append(name, state);
-            row.append(header, metrics);
-            ui.memberList.appendChild(row);
-        }
+        for (const [id, stats] of memberStats) addMemberRow(id, stats);
     }
 
     function recordHostClick() {
@@ -730,12 +886,19 @@
             clearConnectionTimer();
             partyRole = message.role;
             partyCode = message.roomCode;
+            clientDisplayId = message.browserId || '';
+            reconnectAttempt = 0;
+            savePartySession(partyRole, partyCode);
+            // Refresh the grace window on every successful connect so a later drop also gets
+            // a full retry budget before the saved room code is discarded.
+            partyRestoreDeadline = Date.now() + PARTY_RESTORE_WINDOW_MS;
+            updateIdentityDisplay();
             if (partyRole === 'host') {
                 ui.partyCode.textContent = partyCode;
-                ui.partyStatus.textContent = 'Waiting for browsers to join.';
+                setPartyConnectionStatus('Connected. Waiting for browsers to join.', 'ok');
                 renderMemberStats();
             } else {
-                ui.clientId.textContent = message.browserId || getBrowserId();
+                setPartyConnectionStatus('Connected to the party. Waiting for the host…', 'ok');
                 setStatus('Joined. Waiting for the host…');
                 reportGuest('Waiting for host');
             }
@@ -749,6 +912,7 @@
                 clicks: message.status?.clicks || 0,
                 total: message.status?.total ?? null,
                 rate: 0,
+                connected: message.connected !== false,
                 updatedAt: Date.now(),
                 timeDiffMs: Number.isFinite(message.status?.clockOffsetMs) ? message.status.clockOffsetMs - serverClockOffsetMs : null
             });
@@ -765,7 +929,9 @@
         if ((message.type === 'member-reconnecting' || message.type === 'member-reconnected') && partyRole === 'host') {
             const previous = memberStats.get(message.memberId);
             if (previous) {
-                previous.state = message.type === 'member-reconnecting' ? 'Reconnecting…' : (message.status?.state || 'Ready');
+                const reconnecting = message.type === 'member-reconnecting';
+                previous.connected = !reconnecting;
+                previous.state = reconnecting ? 'Reconnecting…' : (message.status?.state || 'Ready');
                 previous.updatedAt = Date.now();
                 memberStats.set(message.memberId, previous);
                 renderMemberStats();
@@ -773,10 +939,12 @@
             return;
         }
         if (message.type === 'host-reconnecting' && partyRole === 'join') {
+            setPartyConnectionStatus('The host is reconnecting…', 'warn');
             setStatus('Host reconnecting…', 'running');
             return;
         }
         if (message.type === 'host-reconnected' && partyRole === 'join') {
+            setPartyConnectionStatus('Host reconnected · synchronized.', 'ok');
             setStatus('Host reconnected. Synchronized.', 'running');
             return;
         }
@@ -792,6 +960,7 @@
                 clicks: message.clicks,
                 total: message.total,
                 rate,
+                connected: true,
                 updatedAt: now,
                 timeDiffMs: Number.isFinite(message.clockOffsetMs) ? message.clockOffsetMs - serverClockOffsetMs : null
             });
@@ -824,10 +993,18 @@
     function applyPartyState(state) {
         if (!state || !Number.isInteger(state.revision)) return;
         if (partyRole === 'host') {
-            if (state.config) applyPartyConfig(state.config);
             partySessionRunning = Boolean(state.running || Number.isFinite(state.scheduledStartAt));
-            if (state.running) setStatus('Room restored. Joined browsers are still running.', 'running');
-            else if (Number.isFinite(state.scheduledStartAt)) setStatus('Room restored. A synchronized start is scheduled.', 'running');
+            // The host owns the config, so it only pulls the room snapshot once per connection
+            // to restore a reloaded room. Re-applying it on every poll would overwrite the
+            // host's own status text and re-resolve the target several times a second.
+            if (!hostStateApplied) {
+                hostStateApplied = true;
+                if (state.config) applyPartyConfig(state.config);
+                else restoreHostTargetFromSession();
+                if (state.running) setStatus('Room restored. Joined browsers are still running.', 'running');
+                else if (Number.isFinite(state.scheduledStartAt)) setStatus('Room restored. A synchronized start is scheduled.', 'running');
+                if (state.running || Number.isFinite(state.scheduledStartAt)) setPartyConnectionStatus('Room restored · party still active.', 'ok');
+            }
             updateControls();
             return;
         }
@@ -964,6 +1141,7 @@
         setTargetDisplay(target);
         endSelection('Button selected');
         syncHostConfig();
+        if (partyRole) savePartySession(partyRole, partyCode);
     }
 
     function beginSelection() {
@@ -1086,7 +1264,8 @@
     });
     ui.chooseHost.addEventListener('click', () => {
         const savedSession = getSavedPartySession();
-        connectToParty('host', savedSession?.role === 'host' ? savedSession.roomCode : generatePartyCode());
+        const resuming = savedSession?.role === 'host';
+        connectToParty('host', resuming ? savedSession.roomCode : generatePartyCode(), resuming);
     });
     ui.chooseJoin.addEventListener('click', () => {
         ui.joinForm.hidden = false;
@@ -1146,6 +1325,6 @@
     const savedPartySession = getSavedPartySession();
     if (savedPartySession) {
         setModeStatus(`Restoring ${savedPartySession.role} session…`);
-        setTimeout(() => connectToParty(savedPartySession.role, savedPartySession.roomCode), 0);
+        setTimeout(() => connectToParty(savedPartySession.role, savedPartySession.roomCode, true), 0);
     }
 })();
